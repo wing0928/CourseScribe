@@ -27,7 +27,7 @@
     if (state.local.status === "transcribing") return "正在本機辨識最新片段…";
     if (state.local.status === "ready") return "本機轉錄已就緒，課程聲音不會離開這個裝置。";
     if (state.local.status === "error") return "本機模型沒有啟動；錄影檔仍會保留在這個裝置。";
-    return "第一次開始時會下載本機模型；之後可離線轉錄。";
+    return "第一次開始時會下載本機模型；音訊會留在這個裝置上處理。";
   }
   function updateCourseTitle() { const title = els.courseTitle.value.trim() || "未命名課程"; els.sessionTitle.textContent = title; document.title = `${title}｜課間捕手`; updateMiniTools(); }
   function updateRefineControl() { els.refineTranscript.disabled = state.isRecording || !state.recordingBlob || state.local.refining; els.refineTranscript.textContent = state.local.refining ? "精修中…" : "課後精修"; }
