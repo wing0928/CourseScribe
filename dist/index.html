@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#08121f" />
+    <meta
+      name="description"
+      content="課間捕手：在上課時即時轉錄，結束後整理成可複習的課程筆記。"
+    />
+    <title>課間捕手｜即時轉錄與課程筆記</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="課程工作區導覽">
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </div>
+          <div>
+            <p class="eyebrow">STUDY CAPTURE</p>
+            <h1>課間捕手</h1>
+          </div>
+        </div>
+
+        <div class="sidebar-section">
+          <div class="section-label-row">
+            <span class="section-label">今天的課程</span>
+            <span class="count-pill">1</span>
+          </div>
+          <button class="session-card is-active" type="button" data-session-card>
+            <span class="session-dot" aria-hidden="true"></span>
+            <span class="session-copy">
+              <strong data-session-list-title>未命名課程</strong>
+              <small data-session-list-status>尚未開始</small>
+            </span>
+            <span class="session-arrow" aria-hidden="true">↗</span>
+          </button>
+        </div>
+
+        <div class="sidebar-note">
+          <div class="sidebar-note-icon" aria-hidden="true">✦</div>
+          <p>課程錄影與逐字稿先留在這個裝置上。開始前，記得確認你的擷取來源。</p>
+        </div>
+
+        <div class="sidebar-footer">
+          <span class="privacy-dot" aria-hidden="true"></span>
+          <span>本機工作區</span>
+          <span class="footer-version">MVP 0.1</span>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">LIVE CLASSROOM</p>
+            <p class="topbar-context">即時課堂工作區</p>
+          </div>
+          <div class="topbar-actions">
+            <span class="status-badge" data-top-status>
+              <span class="status-dot" aria-hidden="true"></span>
+              準備就緒
+            </span>
+            <button class="icon-button" type="button" aria-label="開啟設定" title="開啟設定">⚙</button>
+          </div>
+        </header>
+
+        <section class="workspace-heading" aria-labelledby="page-title">
+          <div>
+            <div class="breadcrumb"><span>我的課程</span><span aria-hidden="true">/</span><span>即時轉錄</span></div>
+            <h2 id="page-title">把今天的課，留成以後看得懂的筆記。</h2>
+            <p>一鍵開始，邊上課邊留下脈絡；下課後，整理成你的複習提綱。</p>
+          </div>
+          <div class="heading-meta">
+            <span class="meta-kicker">SESSION</span>
+            <strong data-session-number>#001</strong>
+          </div>
+        </section>
+
+        <section class="capture-card" aria-labelledby="capture-title">
+          <div class="capture-card-header">
+            <div>
+              <div class="live-label"><span class="live-pulse" aria-hidden="true"></span>LIVE CAPTURE</div>
+              <h3 id="capture-title">先把課程設定好</h3>
+            </div>
+            <span class="capture-state" data-capture-state>Ready to capture</span>
+          </div>
+
+          <div class="capture-controls">
+            <label class="field-group field-course">
+              <span>課程名稱</span>
+              <input type="text" value="未命名課程" placeholder="例如：產品策略｜第 04 堂" data-course-title />
+            </label>
+            <label class="field-group">
+              <span>辨識語言</span>
+              <select data-language>
+                <option value="zh-TW">繁體中文</option>
+                <option value="zh-CN">簡體中文</option>
+                <option value="en-US">English</option>
+                <option value="ja-JP">日本語</option>
+              </select>
+            </label>
+            <label class="field-group">
+              <span>聲音來源</span>
+              <select data-source>
+                <option value="tab">課程分頁（畫面＋聲音）</option>
+                <option value="mic">麥克風（聲音）</option>
+              </select>
+            </label>
+            <button class="record-button" type="button" data-record-button>
+              <span class="record-button-icon" aria-hidden="true"><span></span></span>
+              <span data-record-label>開始錄製與轉錄</span>
+            </button>
+          </div>
+
+          <div class="capture-footer">
+            <div class="capture-hint" data-capture-hint>
+              <span class="hint-icon" aria-hidden="true">⌁</span>
+              <span>按下開始後，允許瀏覽器擷取你選擇的課程分頁聲音。</span>
+            </div>
+            <div class="capability-row">
+              <span class="capability-chip"><span class="chip-check">✓</span> 即時逐字稿</span>
+              <span class="capability-chip"><span class="chip-check">✓</span> 課後重點</span>
+              <span class="capability-chip"><span class="chip-check">✓</span> 同步錄製</span>
+            </div>
+          </div>
+          <div class="recording-result" data-recording-result hidden>
+            <span class="recording-result-icon" aria-hidden="true">↘</span>
+            <span><strong>課程錄影已完成</strong><small>檔案只在這個裝置上產生，請下載保存。</small></span>
+            <a class="download-button" data-recording-link download>下載 .webm</a>
+          </div>
+        </section>
+
+        <div class="live-grid">
+          <section class="transcript-panel panel" aria-labelledby="transcript-title">
+            <div class="panel-header">
+              <div>
+                <div class="panel-kicker">TRANSCRIPT</div>
+                <h3 id="transcript-title">即時逐字稿</h3>
+              </div>
+              <div class="panel-header-right">
+                <span class="word-count" data-word-count>0 字</span>
+                <button class="small-action" type="button" data-clear-transcript>清除</button>
+              </div>
+            </div>
+
+            <div class="transcript-stream" data-transcript-stream aria-live="polite">
+              <div class="transcript-empty" data-transcript-empty>
+                <div class="empty-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+                <strong>還沒有逐字稿</strong>
+                <p>開始轉錄後，這裡會依時間出現課堂內容。</p>
+              </div>
+            </div>
+
+            <div class="transcript-composer">
+              <span class="composer-indicator" data-composer-indicator aria-hidden="true"></span>
+              <span data-composer-copy>等待開始轉錄</span>
+              <span class="composer-shortcut">SPACE</span>
+            </div>
+          </section>
+
+          <section class="notes-panel panel" aria-labelledby="notes-title">
+            <div class="panel-header">
+              <div>
+                <div class="panel-kicker accent-kicker">AFTER CLASS</div>
+                <h3 id="notes-title">課程重點</h3>
+              </div>
+              <span class="notes-status" data-notes-status>尚未整理</span>
+            </div>
+
+            <div class="notes-body" data-notes-body>
+              <div class="notes-empty">
+                <div class="notes-orb" aria-hidden="true"><span>✦</span></div>
+                <strong>下課後，這裡會變成你的複習頁。</strong>
+                <p>先完成一段轉錄，再按下整理，會自動拆出重點、關鍵詞與下一步。</p>
+              </div>
+            </div>
+
+            <div class="notes-actions">
+              <button class="primary-outline-button" type="button" data-generate-notes disabled>
+                <span aria-hidden="true">✦</span> 整理課程重點
+              </button>
+              <button class="secondary-button" type="button" data-copy-notes disabled>複製筆記</button>
+            </div>
+          </section>
+        </div>
+
+        <footer class="main-footer">
+          <span>Tip：課程中途可以繼續做自己的筆記，錄製與轉錄會在背景持續進行。</span>
+          <span class="footer-stamp">DESIGNED FOR FOCUS <span aria-hidden="true">↗</span></span>
+        </footer>
+      </main>
+    </div>
+
+    <div class="toast" role="status" aria-live="polite" data-toast></div>
+    <script src="./app.js" defer></script>
+  </body>
+</html>
