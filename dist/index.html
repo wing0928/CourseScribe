@@ -41,7 +41,7 @@
 
         <div class="sidebar-note">
           <div class="sidebar-note-icon" aria-hidden="true">✦</div>
-          <p>課程錄影與逐字稿先留在這個裝置上。開始前，記得確認你的擷取來源。</p>
+          <p>課程會先錄製在這個裝置上；轉錄狀態會清楚標示，避免把尚未辨識的內容當成逐字稿。</p>
         </div>
 
         <div class="sidebar-footer">
@@ -62,6 +62,9 @@
               <span class="status-dot" aria-hidden="true"></span>
               準備就緒
             </span>
+            <button class="mini-toggle" type="button" data-mini-button>
+              <span aria-hidden="true">◲</span><span data-mini-label>開啟迷你工具</span>
+            </button>
             <button class="icon-button" type="button" aria-label="開啟設定" title="開啟設定">⚙</button>
           </div>
         </header>
@@ -193,6 +196,7 @@
       </main>
     </div>
 
+    <div class="mini-dock" data-mini-dock hidden></div>
     <div class="toast" role="status" aria-live="polite" data-toast></div>
     <script src="./app.js" defer></script>
   </body>
