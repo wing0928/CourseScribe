@@ -41,13 +41,13 @@
 
         <div class="sidebar-note">
           <div class="sidebar-note-icon" aria-hidden="true">✦</div>
-          <p>課程會先錄製在這個裝置上；轉錄狀態會清楚標示，避免把尚未辨識的內容當成逐字稿。</p>
+          <p>課程音訊會先留在這個裝置，本機模型產生逐字稿；不需要雲端轉錄 API。</p>
         </div>
 
         <div class="sidebar-footer">
           <span class="privacy-dot" aria-hidden="true"></span>
           <span>本機工作區</span>
-          <span class="footer-version">MVP 0.1</span>
+          <span class="footer-version">LOCAL 0.2</span>
         </div>
       </aside>
 
@@ -120,10 +120,10 @@
           <div class="capture-footer">
             <div class="capture-hint" data-capture-hint>
               <span class="hint-icon" aria-hidden="true">⌁</span>
-              <span>按下開始後，允許瀏覽器擷取你選擇的課程分頁聲音。</span>
+              <span>第一次使用會下載本機模型；之後課程聲音不會離開這個裝置。</span>
             </div>
             <div class="capability-row">
-              <span class="capability-chip"><span class="chip-check">✓</span> 即時逐字稿</span>
+              <span class="capability-chip"><span class="chip-check">✓</span> 本機逐字稿</span>
               <span class="capability-chip"><span class="chip-check">✓</span> 課後重點</span>
               <span class="capability-chip"><span class="chip-check">✓</span> 同步錄製</span>
             </div>
@@ -181,10 +181,11 @@
             </div>
 
             <div class="notes-actions">
-              <button class="primary-outline-button" type="button" data-generate-notes disabled>
-                <span aria-hidden="true">✦</span> 整理課程重點
-              </button>
-              <button class="secondary-button" type="button" data-copy-notes disabled>複製筆記</button>
+            <button class="primary-outline-button" type="button" data-generate-notes disabled>
+              <span aria-hidden="true">✦</span> 整理課程重點
+            </button>
+            <button class="secondary-button" type="button" data-refine-transcript disabled>課後精修</button>
+            <button class="secondary-button" type="button" data-copy-notes disabled>複製筆記</button>
             </div>
           </section>
         </div>
