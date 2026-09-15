@@ -8,21 +8,29 @@ const { BrowserWindow, ipcMain, dialog, desktopCapturer, session } = require("el
 const path = require("node:path");
 const fs = require("node:fs/promises");
 const os = require("node:os");
-const { spawn } = require("node:child_process");
+const { randomUUID } = require("node:crypto");
 const ffmpegPath = require("ffmpeg-static");
 const { WaveFile } = require("wavefile");
+const { SUPPORTED_MEDIA_EXTENSIONS, normalizeMediaExtension, getMediaType, transcodeMediaToWav } = require("./media-utils.cjs");
 
 let mainWindow;
 let whisperPipeline;
 let whisperLoad;
 const captureSources = new Map();
 let selectedCaptureSource = null;
+const importedMedia = new Map();
 
 function startupLog(message) {
   const line = `[${new Date().toISOString()}] ${message}\n`;
   console.error(line.trim());
   if (app.isReady()) {
     fs.appendFile(path.join(app.getPath("userData"), "startup.log"), line).catch(() => {});
+  }
+}
+
+function clearImportedMediaForSender(senderId) {
+  for (const [id, media] of importedMedia.entries()) {
+    if (media.senderId === senderId) importedMedia.delete(id);
   }
 }
 
@@ -48,6 +56,8 @@ function createWindow() {
     startupLog(`畫面載入失敗 (${code}): ${description} — ${url}`);
   });
   mainWindow.on("unresponsive", () => startupLog("應用程式視窗沒有回應"));
+  const senderId = mainWindow.webContents.id;
+  mainWindow.webContents.once("destroyed", () => clearImportedMediaForSender(senderId));
   mainWindow.loadFile(path.join(__dirname, "index.html")).catch((error) => {
     startupLog(`無法開啟主畫面: ${error.stack || error.message}`);
     mainWindow.show();
@@ -62,24 +72,22 @@ function recordingStamp(date = new Date()) {
   return `${date.toISOString().slice(0, 10)}-${date.toTimeString().slice(0, 8).replace(/:/g, "")}`;
 }
 
+function toBuffer(value) {
+  if (Buffer.isBuffer(value)) return value;
+  if (value instanceof Uint8Array) return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  if (value instanceof ArrayBuffer) return Buffer.from(value);
+  if (Array.isArray(value)) return Buffer.from(value);
+  if (value && Array.isArray(value.data)) return Buffer.from(value.data);
+  throw new Error("找不到可讀取的檔案內容");
+}
+
+function fileTypeLabel(mediaType) {
+  return mediaType === "video" ? "影片" : "錄音";
+}
+
 function emitProgress(sender, stage, detail, progress) {
   sender.send("whisper:progress", { stage, detail, progress: Number.isFinite(progress) ? Math.round(progress) : null });
 }
-
-function runFfmpeg(args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(ffmpegPath, args, { windowsHide: true });
-    let error = "";
-    child.stderr.on("data", (chunk) => { error += chunk.toString(); });
-    child.on("error", reject);
-    child.on("close", (code) => code === 0 ? resolve() : reject(new Error(error || `ffmpeg 結束碼 ${code}`)));
-  });
-}
-
-ipcMain.handle("app:log", (_event, message) => {
-  startupLog(String(message || ""));
-  return true;
-});
 
 async function getWhisper(sender) {
   if (whisperPipeline) return whisperPipeline;
@@ -104,17 +112,94 @@ function languageName(code) {
   return { "zh-TW": "chinese", "zh-CN": "chinese", "en-US": "english", "ja-JP": "japanese" }[code] || "chinese";
 }
 
-async function transcribeRecording(event, { bytes, language }) {
-  if (!bytes) throw new Error("找不到要轉錄的錄製檔");
-  startupLog(`開始轉錄，輸入大小 ${Buffer.byteLength(Buffer.from(bytes))} bytes，語言 ${language || "zh-TW"}`);
+function getImportedMedia(event, sourceId) {
+  const media = importedMedia.get(String(sourceId || ""));
+  if (!media || media.senderId !== event.sender.id) {
+    throw new Error("找不到已選取的影音檔，請重新上傳後再試一次。");
+  }
+  return media;
+}
+
+async function assertImportedMediaReadable(media) {
+  try {
+    const stats = await fs.stat(media.filePath);
+    if (!stats.isFile() || stats.size <= 0) throw new Error("selected file is not readable");
+    return stats;
+  } catch (error) {
+    startupLog(`無法讀取上傳檔案: ${error.stack || error.message}`);
+    throw new Error("無法讀取已選取的檔案；它可能已被移動、刪除或沒有存取權限，請重新選擇。");
+  }
+}
+
+async function chooseMediaFile(event) {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "選擇錄音或影音檔",
+    properties: ["openFile"],
+    filters: [
+      { name: "影音與音訊檔", extensions: SUPPORTED_MEDIA_EXTENSIONS },
+      { name: "所有檔案", extensions: ["*"] },
+    ],
+  });
+  if (result.canceled || !result.filePaths?.[0]) return { canceled: true };
+
+  const filePath = result.filePaths[0];
+  const extension = normalizeMediaExtension(path.extname(filePath));
+  const mediaType = getMediaType(extension);
+  if (!mediaType) {
+    throw new Error("不支援這個檔案格式。請選擇 MP4、WebM、MOV、MKV、MP3、WAV、M4A、AAC、OGG 或 FLAC 檔案。");
+  }
+
+  let stats;
+  try {
+    stats = await fs.stat(filePath);
+  } catch (error) {
+    startupLog(`讀取選取檔案失敗: ${error.stack || error.message}`);
+    throw new Error("無法讀取已選取的檔案，請確認檔案仍在原本的位置。");
+  }
+  if (!stats.isFile() || stats.size <= 0) throw new Error("選取的檔案是空白或不是可讀取的檔案，請重新選擇。");
+
+  clearImportedMediaForSender(event.sender.id);
+  const id = randomUUID();
+  const name = path.basename(filePath);
+  importedMedia.set(id, { id, senderId: event.sender.id, filePath, name, size: stats.size, extension, mediaType });
+  startupLog(`已選取本機${fileTypeLabel(mediaType)}檔案: ${name} (${stats.size} bytes)`);
+  return { canceled: false, id, name, size: stats.size, extension, mediaType };
+}
+
+async function resolveTranscriptionSource(event, payload, tempRoot) {
+  if (payload?.sourceId) {
+    const media = getImportedMedia(event, payload.sourceId);
+    const stats = await assertImportedMediaReadable(media);
+    return { inputPath: media.filePath, name: media.name, size: stats.size, mediaType: media.mediaType };
+  }
+
+  if (!payload?.bytes) throw new Error("找不到要轉錄的錄製檔");
+  let inputBytes;
+  try {
+    inputBytes = toBuffer(payload.bytes);
+  } catch {
+    throw new Error("錄製資料無法讀取，請重新錄製後再試一次。");
+  }
+  if (!inputBytes.length) throw new Error("錄製檔案是空白，請確認錄製時有取得課程聲音。");
+  const extension = normalizeMediaExtension(payload.extension || "webm");
+  const mediaType = getMediaType(extension);
+  if (!mediaType) throw new Error("錄製檔案格式不受支援，請重新錄製後再試一次。");
+  const inputPath = path.join(tempRoot, `recording.${extension}`);
+  await fs.writeFile(inputPath, inputBytes);
+  return { inputPath, name: `錄製課程.${extension}`, size: inputBytes.length, mediaType };
+}
+
+async function transcribeRecording(event, payload = {}) {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "course-capture-"));
-  const input = path.join(tempRoot, "recording.webm");
   const output = path.join(tempRoot, "recording.wav");
   try {
-    await fs.writeFile(input, Buffer.from(bytes));
-    emitProgress(event.sender, "audio", "正在準備完整錄音檔", null);
-    await runFfmpeg(["-y", "-i", input, "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", output]);
-    startupLog("ffmpeg 已完成 WebM → 16 kHz mono WAV");
+    const source = await resolveTranscriptionSource(event, payload, tempRoot);
+    startupLog(`開始轉錄，來源 ${source.name}，輸入大小 ${source.size} bytes，語言 ${payload.language || "zh-TW"}`);
+    emitProgress(event.sender, "audio", `正在從${fileTypeLabel(source.mediaType)}準備 16 kHz 單聲道音訊`, null);
+    await transcodeMediaToWav({ ffmpegPath, inputPath: source.inputPath, outputPath: output });
+    const outputStats = await fs.stat(output);
+    if (outputStats.size <= 44) throw new Error(`「${source.name}」沒有可用的音訊內容。`);
+    startupLog(`ffmpeg 已完成 ${source.name} → 16 kHz mono WAV`);
     const wav = new WaveFile(await fs.readFile(output));
     wav.toBitDepth("32f");
     wav.toSampleRate(16000);
@@ -124,23 +209,63 @@ async function transcribeRecording(event, { bytes, language }) {
     startupLog(`音訊樣本準備完成，共 ${audio.length} samples`);
     const transcriber = await getWhisper(event.sender);
     emitProgress(event.sender, "transcribe", "Whisper 正在轉錄完整課程", null);
-    const modelLanguage = languageName(language);
+    const modelLanguage = languageName(payload.language);
     const chunkLength = modelLanguage === "english" ? 20 : 30;
     const result = await transcriber(audio, { language: modelLanguage, task: "transcribe", return_timestamps: true, chunk_length_s: chunkLength, stride_length_s: 5 });
     const segments = (result.chunks || []).map((chunk) => ({ time: Number(chunk.timestamp?.[0] || 0), text: String(chunk.text || "").trim() })).filter((chunk) => chunk.text);
     startupLog(`Whisper 轉錄完成，${segments.length} 段，${String(result.text || "").replace(/\s/g, "").length} 字`);
     return { text: result.text || "", segments };
+  } catch (error) {
+    startupLog(`轉錄失敗 (${error.code || "unknown"}): ${error.diagnostics || error.stack || error.message}`);
+    throw error;
   } finally {
     await fs.rm(tempRoot, { recursive: true, force: true });
   }
 }
 
-ipcMain.handle("recording:save", async (_event, { bytes, courseTitle }) => {
-  const target = path.join(app.getPath("videos"), `${safeBaseName(courseTitle)}-${recordingStamp()}.webm`);
-  await fs.writeFile(target, Buffer.from(bytes));
-  startupLog(`錄影已儲存: ${target} (${Buffer.byteLength(Buffer.from(bytes))} bytes)`);
-  return { path: target };
+ipcMain.handle("app:log", (_event, message) => {
+  startupLog(String(message || ""));
+  return true;
 });
+
+ipcMain.handle("recording:save", async (_event, { bytes, courseTitle }) => {
+  const inputBytes = toBuffer(bytes);
+  const fileName = `${safeBaseName(courseTitle)}-${recordingStamp()}.webm`;
+  const target = path.join(app.getPath("videos"), fileName);
+  await fs.writeFile(target, inputBytes);
+  startupLog(`錄影已儲存: ${target} (${inputBytes.length} bytes)`);
+  return { saved: true, name: fileName, size: inputBytes.length };
+});
+
+ipcMain.handle("recording:choose-media", chooseMediaFile);
+ipcMain.handle("recording:transcribe", transcribeRecording);
+
+ipcMain.handle("recording:export", async (_event, { bytes, courseTitle }) => {
+  const date = new Date().toISOString().slice(0, 10);
+  const result = await dialog.showSaveDialog(mainWindow, { defaultPath: `${safeBaseName(courseTitle)}-${date}.webm`, filters: [{ name: "WebM 影片", extensions: ["webm"] }] });
+  if (result.canceled || !result.filePath) return { canceled: true };
+  await fs.writeFile(result.filePath, toBuffer(bytes));
+  return { canceled: false };
+});
+
+ipcMain.handle("recording:export-imported", async (event, { sourceId, courseTitle }) => {
+  const media = getImportedMedia(event, sourceId);
+  await assertImportedMediaReadable(media);
+  const date = new Date().toISOString().slice(0, 10);
+  const result = await dialog.showSaveDialog(mainWindow, {
+    defaultPath: `${safeBaseName(courseTitle)}-${date}.${media.extension}`,
+    filters: [{ name: `${fileTypeLabel(media.mediaType)}檔案`, extensions: [media.extension] }],
+  });
+  if (result.canceled || !result.filePath) return { canceled: true };
+  try {
+    await fs.copyFile(media.filePath, result.filePath);
+  } catch (error) {
+    startupLog(`匯出上傳檔案失敗: ${error.stack || error.message}`);
+    throw new Error("無法匯出原始檔案，請確認目的資料夾可寫入後再試一次。");
+  }
+  return { canceled: false };
+});
+
 ipcMain.handle("capture:list", async () => {
   try {
     const sources = await desktopCapturer.getSources({ types: ["screen", "window"], thumbnailSize: { width: 320, height: 180 } });
@@ -155,10 +280,12 @@ ipcMain.handle("capture:list", async () => {
     throw error;
   }
 });
+
 ipcMain.handle("capture:select", (_event, id) => {
   selectedCaptureSource = captureSources.get(id) || null;
   return Boolean(selectedCaptureSource);
 });
+
 ipcMain.handle("capture:select-desktop", async () => {
   try {
     const sources = await desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 1, height: 1 } });
@@ -169,14 +296,6 @@ ipcMain.handle("capture:select-desktop", async () => {
     startupLog(`選擇桌面來源失敗: ${error.stack || error.message}`);
     throw error;
   }
-});
-ipcMain.handle("recording:transcribe", transcribeRecording);
-ipcMain.handle("recording:export", async (_event, { bytes, courseTitle }) => {
-  const date = new Date().toISOString().slice(0, 10);
-  const result = await dialog.showSaveDialog(mainWindow, { defaultPath: `${safeBaseName(courseTitle)}-${date}.webm`, filters: [{ name: "WebM 影片", extensions: ["webm"] }] });
-  if (result.canceled || !result.filePath) return { canceled: true };
-  await fs.writeFile(result.filePath, Buffer.from(bytes));
-  return { canceled: false, path: result.filePath };
 });
 
 process.on("uncaughtException", (error) => startupLog(`未處理例外: ${error.stack || error.message}`));
@@ -191,4 +310,8 @@ app.whenReady().then(() => {
   createWindow();
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 }).catch((error) => startupLog(`應用程式啟動失敗: ${error.stack || error.message}`));
-app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
+
+app.on("window-all-closed", () => {
+  importedMedia.clear();
+  if (process.platform !== "darwin") app.quit();
+});

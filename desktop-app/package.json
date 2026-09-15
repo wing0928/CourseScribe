@@ -1,13 +1,14 @@
 {
   "name": "course-capture-desktop",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "private": true,
   "description": "本機 Whisper 課程錄製與課後筆記桌面應用程式",
   "main": "main.cjs",
   "scripts": {
     "start": "electron .",
-    "check": "node --check main.cjs && node --check preload.cjs && node --check renderer.js",
+    "check": "node --check main.cjs && node --check preload.cjs && node --check renderer.js && node --check media-utils.cjs && node --check scripts/smoke-electron.cjs && node --check scripts/verify-media-import.cjs",
     "verify:ui": "electron --no-sandbox --disable-gpu --disable-gpu-compositing --disable-features=VizDisplayCompositor --in-process-gpu scripts/smoke-electron.cjs",
+    "verify:media": "node scripts/verify-media-import.cjs",
     "verify:captions": "node scripts/compare-caption.mjs",
     "verify:whisper": "node scripts/verify-whisper.mjs",
     "package:windows": "electron-builder --win portable"
