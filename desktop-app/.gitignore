@@ -1,6 +1,8 @@
 node_modules/
 dist/
 release/
+release-0.1.6/
+release-final/
 verified-release/
 verified-release-2/
 verified-release-3/
