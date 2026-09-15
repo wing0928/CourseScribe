@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("courseCapture", {
   listCaptureSources: () => ipcRenderer.invoke("capture:list"),
   selectCaptureSource: (id) => ipcRenderer.invoke("capture:select", id),
+  selectDesktopSource: () => ipcRenderer.invoke("capture:select-desktop"),
   saveRecording: (payload) => ipcRenderer.invoke("recording:save", payload),
   transcribeRecording: (payload) => ipcRenderer.invoke("recording:transcribe", payload),
   exportRecording: (payload) => ipcRenderer.invoke("recording:export", payload),

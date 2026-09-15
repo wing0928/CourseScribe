@@ -15,35 +15,13 @@ function showTranscript() {
 }
 function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[c]); }
 async function chooseSource() {
-  els.picker.hidden = false;
-  return new Promise((resolve, reject) => {
-    let finished = false;
-    const close = (result) => {
-      if (finished) return;
-      finished = true;
-      els.picker.hidden = true;
-      els.sourceList.replaceChildren();
-      result === true ? resolve(true) : reject(result instanceof Error ? result : new Error("未選擇錄製來源"));
-    };
-    els.pickerClose.onclick = () => close(new Error("未選擇錄製來源"));
-    els.sourceList.innerHTML = '<div class="source-message">正在讀取可錄製的畫面與課程視窗…</div>';
-    window.courseCapture.listCaptureSources().then((sources) => {
-      if (!sources?.length) throw new Error("找不到可錄製的畫面或視窗。請確認課程或影片已開啟，再按一次開始錄製。");
-      els.sourceList.innerHTML = sources.map((source) => `<button class="source-option" data-source-id="${escapeHtml(source.id)}"><img src="${source.thumbnail}" alt="" /><span>${escapeHtml(source.name)}</span></button>`).join("");
-      els.sourceList.querySelectorAll("[data-source-id]").forEach((button) => button.addEventListener("click", async () => {
-        try {
-          const selected = await window.courseCapture.selectCaptureSource(button.dataset.sourceId);
-          selected ? close(true) : close(new Error("無法選擇這個來源"));
-        } catch (error) { close(error); }
-      }, { once: true }));
-    }).catch((error) => {
-      els.sourceList.innerHTML = `<div class="source-message error">${escapeHtml(error.message || "讀取錄製來源失敗")}</div>`;
-      setStatus(error.message || "讀取錄製來源失敗");
-    });
-  });
+  const selected = await window.courseCapture.selectDesktopSource();
+  if (!selected) throw new Error("找不到可錄製的桌面來源，請重新開啟應用程式後再試一次。");
+  return true;
 }
 async function startRecording() {
   try {
+    setStatus("正在準備錄製整個桌面與 Windows 系統聲音…");
     await chooseSource();
     state.stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
     state.chunks = [];

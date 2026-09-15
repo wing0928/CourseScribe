@@ -142,6 +142,17 @@ ipcMain.handle("capture:select", (_event, id) => {
   selectedCaptureSource = captureSources.get(id) || null;
   return Boolean(selectedCaptureSource);
 });
+ipcMain.handle("capture:select-desktop", async () => {
+  try {
+    const sources = await desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 1, height: 1 } });
+    selectedCaptureSource = sources[0] || null;
+    startupLog(selectedCaptureSource ? "已選擇主要桌面作為錄製來源" : "找不到可錄製的桌面來源");
+    return Boolean(selectedCaptureSource);
+  } catch (error) {
+    startupLog(`選擇桌面來源失敗: ${error.stack || error.message}`);
+    throw error;
+  }
+});
 ipcMain.handle("recording:transcribe", transcribeRecording);
 ipcMain.handle("recording:export", async (_event, { bytes, courseTitle }) => {
   const date = new Date().toISOString().slice(0, 10);
