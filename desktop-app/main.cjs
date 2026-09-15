@@ -12,6 +12,18 @@ let whisperLoad;
 const captureSources = new Map();
 let selectedCaptureSource = null;
 
+// Some Windows graphics drivers fail before Electron's first paint. The app is
+// a productivity tool, so predictable launch behavior matters more than GPU rendering.
+app.disableHardwareAcceleration();
+
+function startupLog(message) {
+  const line = `[${new Date().toISOString()}] ${message}\n`;
+  console.error(line.trim());
+  if (app.isReady()) {
+    fs.appendFile(path.join(app.getPath("userData"), "startup.log"), line).catch(() => {});
+  }
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1040,
@@ -20,9 +32,24 @@ function createWindow() {
     minHeight: 620,
     backgroundColor: "#08111e",
     title: "課間捕手",
+    show: true,
     webPreferences: { preload: path.join(__dirname, "preload.cjs"), contextIsolation: true, nodeIntegration: false },
   });
-  mainWindow.loadFile("index.html");
+  mainWindow.once("ready-to-show", () => { mainWindow.show(); mainWindow.focus(); });
+  mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+    if (level >= 2) startupLog(`畫面錯誤: ${message} (${sourceId}:${line})`);
+  });
+  mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    startupLog(`畫面程序停止: ${details.reason} (${details.exitCode})`);
+  });
+  mainWindow.webContents.on("did-fail-load", (_event, code, description, url) => {
+    startupLog(`畫面載入失敗 (${code}): ${description} — ${url}`);
+  });
+  mainWindow.on("unresponsive", () => startupLog("應用程式視窗沒有回應"));
+  mainWindow.loadFile(path.join(__dirname, "index.html")).catch((error) => {
+    startupLog(`無法開啟主畫面: ${error.stack || error.message}`);
+    mainWindow.show();
+  });
 }
 
 function safeBaseName(value) {
@@ -118,6 +145,9 @@ ipcMain.handle("recording:export", async (_event, { bytes, courseTitle }) => {
   return { canceled: false, path: result.filePath };
 });
 
+process.on("uncaughtException", (error) => startupLog(`未處理例外: ${error.stack || error.message}`));
+process.on("unhandledRejection", (error) => startupLog(`未處理 Promise: ${error?.stack || error}`));
+
 app.whenReady().then(() => {
   session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
     const source = selectedCaptureSource;
@@ -126,5 +156,5 @@ app.whenReady().then(() => {
   });
   createWindow();
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
-});
+}).catch((error) => startupLog(`應用程式啟動失敗: ${error.stack || error.message}`));
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });

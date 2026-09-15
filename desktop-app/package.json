@@ -1,6 +1,6 @@
 {
   "name": "course-capture-desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "本機 Whisper 課程錄製與課後筆記桌面應用程式",
   "main": "main.cjs",
