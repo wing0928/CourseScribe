@@ -1,0 +1,44 @@
+{
+  "name": "course-capture-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "本機 Whisper 課程錄製與課後筆記桌面應用程式",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "check": "node --check main.cjs && node --check preload.cjs && node --check renderer.js",
+    "verify:whisper": "node scripts/verify-whisper.mjs",
+    "package:windows": "electron-builder --win portable"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
+    "ffmpeg-static": "^5.3.0",
+    "wavefile": "^11.0.0"
+  },
+  "allowScripts": {
+    "ffmpeg-static@5.3.0": true,
+    "onnxruntime-node@1.24.3": true
+  },
+  "build": {
+    "appId": "com.coursecapture.desktop",
+    "productName": "課間捕手",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/**",
+      "node_modules/onnxruntime-node/**"
+    ],
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "artifactName": "CourseCapture-${version}-portable.${ext}"
+    }
+  },
+  "devDependencies": {
+    "electron": "^44.3.0",
+    "electron-builder": "^26.15.3"
+  }
+}

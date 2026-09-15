@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>課間捕手</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <div class="brand"><span class="brand-mark">◌</span><span><b>課間捕手</b><small>WHISPER · 本機課後轉錄</small></span></div>
+        <span class="privacy">● 音訊只在這台電腦處理</span>
+      </header>
+
+      <section class="hero">
+        <p class="eyebrow">COURSE RECORDING</p>
+        <h1>先專心上課，<br />下課再整理。</h1>
+        <p>錄完完整課程後，再由本機 Whisper 建立逐字稿與複習筆記。</p>
+      </section>
+
+      <section class="capture-card" aria-labelledby="capture-title">
+        <div class="capture-head"><div><p class="eyebrow">1 · RECORD</p><h2 id="capture-title">錄製課程</h2></div><span class="state" data-state>尚未開始</span></div>
+        <div class="controls">
+          <label><span>課程名稱</span><input data-course-title value="未命名課程" /></label>
+          <label><span>語言</span><select data-language><option value="zh-TW">繁體中文</option><option value="zh-CN">簡體中文</option><option value="en-US">English</option><option value="ja-JP">日本語</option></select></label>
+          <button class="record" data-record><span data-record-icon>●</span><span data-record-label>開始錄製</span></button>
+        </div>
+        <p class="help">開始後選擇課程畫面並勾選分享聲音。逐字稿會在錄製結束後才開始產生。</p>
+      </section>
+
+      <section class="progress-card" data-progress-card hidden><div class="progress-top"><span data-progress-stage>準備中</span><b data-progress-copy>正在處理課程錄影</b></div><div class="progress-track"><i data-progress-bar></i></div></section>
+
+      <div class="grid">
+        <section class="panel"><div class="panel-head"><div><p class="eyebrow">2 · TRANSCRIBE</p><h2>課後逐字稿</h2></div><span data-word-count>0 字</span></div><div class="empty" data-transcript><span>◎</span><b>錄製結束後才會開始轉錄</b><p>Whisper 會在這台電腦處理完整音訊；第一次需下載模型。</p></div><div class="panel-actions"><button data-transcribe disabled>使用 Whisper 轉錄</button><button data-export disabled>匯出錄影</button></div></section>
+        <section class="panel notes"><div class="panel-head"><div><p class="eyebrow">3 · REVIEW</p><h2>課程筆記</h2></div></div><div class="empty" data-notes><span>✦</span><b>逐字稿完成後整理重點</b><p>將完整內容整理成重點、關鍵詞與一句話摘要。</p></div><div class="panel-actions"><button data-notes-button disabled>整理課程重點</button><button data-copy disabled>複製筆記</button></div></section>
+      </div>
+      <p class="status" role="status" data-status>準備好後開始錄製。</p>
+    </main>
+    <div class="picker" data-picker hidden role="dialog" aria-modal="true" aria-labelledby="picker-title">
+      <section class="picker-card"><div class="picker-head"><div><p class="eyebrow">SELECT SOURCE</p><h2 id="picker-title">選擇要錄製的課程</h2></div><button data-picker-close aria-label="關閉">×</button></div><p>選擇課程視窗或螢幕後，桌面版會同時錄製該畫面與 Windows 系統聲音。</p><div class="source-list" data-source-list></div></section>
+    </div>
+    <script src="renderer.js"></script>
+  </body>
+</html>
