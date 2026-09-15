@@ -1,4 +1,10 @@
-const { app, BrowserWindow, ipcMain, dialog, desktopCapturer, session } = require("electron");
+const { app } = require("electron");
+
+// Apply the fallback before creating the first window. Some Windows graphics
+// drivers fail before Electron's first paint.
+app.disableHardwareAcceleration();
+
+const { BrowserWindow, ipcMain, dialog, desktopCapturer, session } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs/promises");
 const os = require("node:os");
@@ -11,10 +17,6 @@ let whisperPipeline;
 let whisperLoad;
 const captureSources = new Map();
 let selectedCaptureSource = null;
-
-// Some Windows graphics drivers fail before Electron's first paint. The app is
-// a productivity tool, so predictable launch behavior matters more than GPU rendering.
-app.disableHardwareAcceleration();
 
 function startupLog(message) {
   const line = `[${new Date().toISOString()}] ${message}\n`;
@@ -56,6 +58,10 @@ function safeBaseName(value) {
   return String(value || "course").replace(/[\\/:*?"<>|]/g, "-").slice(0, 48);
 }
 
+function recordingStamp(date = new Date()) {
+  return `${date.toISOString().slice(0, 10)}-${date.toTimeString().slice(0, 8).replace(/:/g, "")}`;
+}
+
 function emitProgress(sender, stage, detail, progress) {
   sender.send("whisper:progress", { stage, detail, progress: Number.isFinite(progress) ? Math.round(progress) : null });
 }
@@ -69,6 +75,11 @@ function runFfmpeg(args) {
     child.on("close", (code) => code === 0 ? resolve() : reject(new Error(error || `ffmpeg 結束碼 ${code}`)));
   });
 }
+
+ipcMain.handle("app:log", (_event, message) => {
+  startupLog(String(message || ""));
+  return true;
+});
 
 async function getWhisper(sender) {
   if (whisperPipeline) return whisperPipeline;
@@ -84,7 +95,7 @@ async function getWhisper(sender) {
       });
       emitProgress(sender, "model", "Whisper 模型已準備完成", 100);
       return whisperPipeline;
-    })().catch((error) => { whisperLoad = null; throw error; });
+    })().catch((error) => { startupLog(`Whisper 模型載入失敗: ${error.stack || error.message}`); whisperLoad = null; throw error; });
   }
   return whisperLoad;
 }
@@ -95,6 +106,7 @@ function languageName(code) {
 
 async function transcribeRecording(event, { bytes, language }) {
   if (!bytes) throw new Error("找不到要轉錄的錄製檔");
+  startupLog(`開始轉錄，輸入大小 ${Buffer.byteLength(Buffer.from(bytes))} bytes，語言 ${language || "zh-TW"}`);
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "course-capture-"));
   const input = path.join(tempRoot, "recording.webm");
   const output = path.join(tempRoot, "recording.wav");
@@ -102,16 +114,21 @@ async function transcribeRecording(event, { bytes, language }) {
     await fs.writeFile(input, Buffer.from(bytes));
     emitProgress(event.sender, "audio", "正在準備完整錄音檔", null);
     await runFfmpeg(["-y", "-i", input, "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", output]);
+    startupLog("ffmpeg 已完成 WebM → 16 kHz mono WAV");
     const wav = new WaveFile(await fs.readFile(output));
     wav.toBitDepth("32f");
     wav.toSampleRate(16000);
     let samples = wav.getSamples();
     if (Array.isArray(samples)) samples = samples[0];
     const audio = samples instanceof Float32Array ? samples : new Float32Array(samples);
+    startupLog(`音訊樣本準備完成，共 ${audio.length} samples`);
     const transcriber = await getWhisper(event.sender);
     emitProgress(event.sender, "transcribe", "Whisper 正在轉錄完整課程", null);
-    const result = await transcriber(audio, { language: languageName(language), task: "transcribe", return_timestamps: true, chunk_length_s: 30, stride_length_s: 5 });
+    const modelLanguage = languageName(language);
+    const chunkLength = modelLanguage === "english" ? 20 : 30;
+    const result = await transcriber(audio, { language: modelLanguage, task: "transcribe", return_timestamps: true, chunk_length_s: chunkLength, stride_length_s: 5 });
     const segments = (result.chunks || []).map((chunk) => ({ time: Number(chunk.timestamp?.[0] || 0), text: String(chunk.text || "").trim() })).filter((chunk) => chunk.text);
+    startupLog(`Whisper 轉錄完成，${segments.length} 段，${String(result.text || "").replace(/\s/g, "").length} 字`);
     return { text: result.text || "", segments };
   } finally {
     await fs.rm(tempRoot, { recursive: true, force: true });
@@ -119,9 +136,9 @@ async function transcribeRecording(event, { bytes, language }) {
 }
 
 ipcMain.handle("recording:save", async (_event, { bytes, courseTitle }) => {
-  const date = new Date().toISOString().slice(0, 10);
-  const target = path.join(app.getPath("videos"), `${safeBaseName(courseTitle)}-${date}.webm`);
+  const target = path.join(app.getPath("videos"), `${safeBaseName(courseTitle)}-${recordingStamp()}.webm`);
   await fs.writeFile(target, Buffer.from(bytes));
+  startupLog(`錄影已儲存: ${target} (${Buffer.byteLength(Buffer.from(bytes))} bytes)`);
   return { path: target };
 });
 ipcMain.handle("capture:list", async () => {

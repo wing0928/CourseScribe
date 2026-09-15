@@ -1,12 +1,14 @@
 {
   "name": "course-capture-desktop",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "description": "本機 Whisper 課程錄製與課後筆記桌面應用程式",
   "main": "main.cjs",
   "scripts": {
     "start": "electron .",
     "check": "node --check main.cjs && node --check preload.cjs && node --check renderer.js",
+    "verify:ui": "electron --no-sandbox --disable-gpu --disable-gpu-compositing --disable-features=VizDisplayCompositor --in-process-gpu scripts/smoke-electron.cjs",
+    "verify:captions": "node scripts/compare-caption.mjs",
     "verify:whisper": "node scripts/verify-whisper.mjs",
     "package:windows": "electron-builder --win portable"
   },
@@ -23,12 +25,19 @@
     "appId": "com.coursecapture.desktop",
     "productName": "課間捕手",
     "asar": true,
+    "files": [
+      "**/*",
+      "!node_modules/onnxruntime-node/bin/napi-v6/darwin/**",
+      "!node_modules/onnxruntime-node/bin/napi-v6/linux/**",
+      "!node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**",
+      "!verification-output/**"
+    ],
     "directories": {
       "output": "release"
     },
     "asarUnpack": [
-      "node_modules/ffmpeg-static/**",
-      "node_modules/onnxruntime-node/**"
+      "node_modules/ffmpeg-static/ffmpeg.exe",
+      "node_modules/onnxruntime-node/bin/napi-v6/win32/x64/**"
     ],
     "win": {
       "target": [

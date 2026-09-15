@@ -1,0 +1,43 @@
+# CourseScribe（課間捕手）
+
+CourseScribe 是 Windows 桌面版線上課程錄製與課後整理工具。它使用本機 Whisper 模型，在課後將錄製內容轉成逐字稿，再整理成課程重點與筆記。
+
+## 目前版本
+
+`0.1.5`
+
+- 一鍵錄製主要桌面畫面、Windows 系統音訊與麥克風
+- 課後以本機 Whisper `whisper-small`（CPU / q4）轉錄，不需要付費 API
+- 產生逐字稿、關鍵字與課程筆記
+- 錄影檔使用時間戳命名，避免覆蓋上一堂課
+- 轉錄與錄製狀態會寫入本機診斷記錄
+
+## 使用方式
+
+1. 下載 GitHub Releases 的 `CourseCapture-*-portable.exe`。
+2. 開啟程式並允許螢幕與音訊擷取。
+3. 開始錄製課程；課後按停止。
+4. 按「生成逐字稿」，等待本機模型完成。
+5. 按「整理課程筆記」。
+
+錄影、模型與診斷記錄預設留在本機，不會自動上傳課程內容。
+
+## 從原始碼執行
+
+```powershell
+cd desktop-app
+npm install
+npm start
+```
+
+檢查與驗證指令：
+
+```powershell
+npm run check
+npm run verify:ui
+npm run verify:captions
+```
+
+## 版本記錄
+
+完整的舊版程式碼與修正紀錄保留在 Git commit history；摘要請見 [CHANGELOG.md](CHANGELOG.md)。
