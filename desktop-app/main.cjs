@@ -125,12 +125,18 @@ ipcMain.handle("recording:save", async (_event, { bytes, courseTitle }) => {
   return { path: target };
 });
 ipcMain.handle("capture:list", async () => {
-  const sources = await desktopCapturer.getSources({ types: ["screen", "window"], thumbnailSize: { width: 320, height: 180 } });
-  captureSources.clear();
-  return sources.map((source) => {
-    captureSources.set(source.id, source);
-    return { id: source.id, name: source.name, thumbnail: source.thumbnail.toDataURL() };
-  });
+  try {
+    const sources = await desktopCapturer.getSources({ types: ["screen", "window"], thumbnailSize: { width: 320, height: 180 } });
+    startupLog(`找到 ${sources.length} 個可錄製來源`);
+    captureSources.clear();
+    return sources.map((source) => {
+      captureSources.set(source.id, source);
+      return { id: source.id, name: source.name, thumbnail: source.thumbnail.toDataURL() };
+    });
+  } catch (error) {
+    startupLog(`讀取錄製來源失敗: ${error.stack || error.message}`);
+    throw error;
+  }
 });
 ipcMain.handle("capture:select", (_event, id) => {
   selectedCaptureSource = captureSources.get(id) || null;

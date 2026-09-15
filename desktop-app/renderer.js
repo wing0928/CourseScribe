@@ -15,14 +15,31 @@ function showTranscript() {
 }
 function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[c]); }
 async function chooseSource() {
-  const sources = await window.courseCapture.listCaptureSources();
-  if (!sources.length) throw new Error("找不到可錄製的畫面或視窗");
-  els.sourceList.innerHTML = sources.map((source) => `<button class="source-option" data-source-id="${escapeHtml(source.id)}"><img src="${source.thumbnail}" alt="" /><span>${escapeHtml(source.name)}</span></button>`).join("");
   els.picker.hidden = false;
   return new Promise((resolve, reject) => {
-    const finish = (value) => { els.picker.hidden = true; els.sourceList.replaceChildren(); resolve(value); };
-    els.sourceList.querySelectorAll("[data-source-id]").forEach((button) => button.addEventListener("click", async () => { const selected = await window.courseCapture.selectCaptureSource(button.dataset.sourceId); selected ? finish(true) : reject(new Error("無法選擇這個來源")); }, { once: true }));
-    els.pickerClose.onclick = () => { els.picker.hidden = true; els.sourceList.replaceChildren(); reject(new Error("未選擇錄製來源")); };
+    let finished = false;
+    const close = (result) => {
+      if (finished) return;
+      finished = true;
+      els.picker.hidden = true;
+      els.sourceList.replaceChildren();
+      result === true ? resolve(true) : reject(result instanceof Error ? result : new Error("未選擇錄製來源"));
+    };
+    els.pickerClose.onclick = () => close(new Error("未選擇錄製來源"));
+    els.sourceList.innerHTML = '<div class="source-message">正在讀取可錄製的畫面與課程視窗…</div>';
+    window.courseCapture.listCaptureSources().then((sources) => {
+      if (!sources?.length) throw new Error("找不到可錄製的畫面或視窗。請確認課程或影片已開啟，再按一次開始錄製。");
+      els.sourceList.innerHTML = sources.map((source) => `<button class="source-option" data-source-id="${escapeHtml(source.id)}"><img src="${source.thumbnail}" alt="" /><span>${escapeHtml(source.name)}</span></button>`).join("");
+      els.sourceList.querySelectorAll("[data-source-id]").forEach((button) => button.addEventListener("click", async () => {
+        try {
+          const selected = await window.courseCapture.selectCaptureSource(button.dataset.sourceId);
+          selected ? close(true) : close(new Error("無法選擇這個來源"));
+        } catch (error) { close(error); }
+      }, { once: true }));
+    }).catch((error) => {
+      els.sourceList.innerHTML = `<div class="source-message error">${escapeHtml(error.message || "讀取錄製來源失敗")}</div>`;
+      setStatus(error.message || "讀取錄製來源失敗");
+    });
   });
 }
 async function startRecording() {
