@@ -86,7 +86,17 @@ function fileTypeLabel(mediaType) {
 }
 
 function emitProgress(sender, stage, detail, progress) {
-  sender.send("whisper:progress", { stage, detail, progress: Number.isFinite(progress) ? Math.round(progress) : null });
+  if (!sender || sender.isDestroyed?.()) return;
+  const numericProgress = Number(progress);
+  const safeProgress = Number.isFinite(numericProgress) ? Math.min(100, Math.max(0, Math.round(numericProgress))) : null;
+  sender.send("whisper:progress", { stage, detail, progress: safeProgress });
+}
+
+function emitTranscript(sender, segments, progress, done = false) {
+  if (!sender || sender.isDestroyed?.()) return;
+  const numericProgress = Number(progress);
+  const safeProgress = Number.isFinite(numericProgress) ? Math.min(100, Math.max(0, Math.round(numericProgress))) : null;
+  sender.send("whisper:transcript", { segments, progress: safeProgress, done });
 }
 
 async function getWhisper(sender) {
@@ -195,7 +205,7 @@ async function transcribeRecording(event, payload = {}) {
   try {
     const source = await resolveTranscriptionSource(event, payload, tempRoot);
     startupLog(`開始轉錄，來源 ${source.name}，輸入大小 ${source.size} bytes，語言 ${payload.language || "zh-TW"}`);
-    emitProgress(event.sender, "audio", `正在從${fileTypeLabel(source.mediaType)}準備 16 kHz 單聲道音訊`, null);
+    emitProgress(event.sender, "audio", `正在從${fileTypeLabel(source.mediaType)}準備 16 kHz 單聲道音訊（0%）`, 0);
     await transcodeMediaToWav({ ffmpegPath, inputPath: source.inputPath, outputPath: output });
     const outputStats = await fs.stat(output);
     if (outputStats.size <= 44) throw new Error(`「${source.name}」沒有可用的音訊內容。`);
@@ -208,13 +218,68 @@ async function transcribeRecording(event, payload = {}) {
     const audio = samples instanceof Float32Array ? samples : new Float32Array(samples);
     startupLog(`音訊樣本準備完成，共 ${audio.length} samples`);
     const transcriber = await getWhisper(event.sender);
-    emitProgress(event.sender, "transcribe", "Whisper 正在轉錄完整課程", null);
     const modelLanguage = languageName(payload.language);
-    const chunkLength = modelLanguage === "english" ? 20 : 30;
-    const result = await transcriber(audio, { language: modelLanguage, task: "transcribe", return_timestamps: true, chunk_length_s: chunkLength, stride_length_s: 5 });
-    const segments = (result.chunks || []).map((chunk) => ({ time: Number(chunk.timestamp?.[0] || 0), text: String(chunk.text || "").trim() })).filter((chunk) => chunk.text);
-    startupLog(`Whisper 轉錄完成，${segments.length} 段，${String(result.text || "").replace(/\s/g, "").length} 字`);
-    return { text: result.text || "", segments };
+    const duration = audio.length / 16000;
+    if (!Number.isFinite(duration) || duration <= 0) throw new Error(`「${source.name}」沒有可用的音訊內容。`);
+
+    // Process short windows so the first completed Whisper window can be shown immediately.
+    // A small overlap helps preserve words that cross a window boundary.
+    const chunkLength = 20;
+    const overlap = 3;
+    const chunkCount = Math.max(1, Math.ceil(duration / chunkLength));
+    const segments = [];
+    emitProgress(event.sender, "transcribe", "Whisper 已準備完成，開始轉錄（0%）", 0);
+
+    const normalizeSegmentText = (text) => String(text || "").replace(/\s+/g, "").trim().toLowerCase();
+    const appendUniqueSegments = (target, candidates) => {
+      const added = [];
+      for (const candidate of candidates) {
+        const text = String(candidate.text || "").trim();
+        if (!text) continue;
+        const normalized = normalizeSegmentText(text);
+        const duplicate = target.some((existing) => normalizeSegmentText(existing.text) === normalized && Math.abs(Number(existing.time || 0) - Number(candidate.time || 0)) < 5);
+        if (duplicate) continue;
+        const segment = { time: Number(Number(candidate.time || 0).toFixed(2)), text };
+        target.push(segment);
+        added.push(segment);
+      }
+      target.sort((left, right) => left.time - right.time);
+      return added.sort((left, right) => left.time - right.time);
+    };
+
+    for (let index = 0; index < chunkCount; index += 1) {
+      const baseStart = index * chunkLength;
+      const baseEnd = Math.min(duration, baseStart + chunkLength);
+      const windowStart = Math.max(0, baseStart - overlap);
+      const startSample = Math.floor(windowStart * 16000);
+      const endSample = Math.min(audio.length, Math.ceil(baseEnd * 16000));
+      const windowAudio = audio.slice(startSample, endSample);
+      const beforeProgress = duration > 0 ? Math.round((baseStart / duration) * 100) : 0;
+      emitProgress(event.sender, "transcribe", `正在轉錄第 ${index + 1}/${chunkCount} 段（${beforeProgress}%）`, beforeProgress);
+
+      const result = await transcriber(windowAudio, { language: modelLanguage, task: "transcribe", return_timestamps: true });
+      const rawChunks = Array.isArray(result.chunks) && result.chunks.length ? result.chunks : (result.text ? [{ text: result.text, timestamp: [0, null] }] : []);
+      const candidates = rawChunks.map((chunk) => {
+        const rawStart = chunk.timestamp?.[0];
+        const rawEnd = chunk.timestamp?.[1];
+        const localStart = Number(rawStart);
+        const localEnd = rawEnd == null ? Number.NaN : Number(rawEnd);
+        return {
+          time: windowStart + (Number.isFinite(localStart) ? localStart : 0),
+          endTime: Number.isFinite(localEnd) ? windowStart + localEnd : null,
+          text: String(chunk.text || "").trim(),
+        };
+      }).filter((chunk) => chunk.text && (baseStart === 0 || chunk.endTime == null || chunk.endTime > baseStart + 0.25));
+      const added = appendUniqueSegments(segments, candidates);
+      const progress = duration > 0 ? Math.min(100, Math.round((baseEnd / duration) * 100)) : 100;
+      if (added.length) emitTranscript(event.sender, added, progress);
+      emitProgress(event.sender, "transcribe", `已完成 ${progress}%（第 ${index + 1}/${chunkCount} 段）`, progress);
+    }
+
+    emitTranscript(event.sender, [], 100, true);
+    const text = modelLanguage === "english" ? segments.map((segment) => segment.text).join(" ") : segments.map((segment) => segment.text).join("");
+    startupLog(`Whisper 轉錄完成，${segments.length} 段，${text.replace(/\s/g, "").length} 字`);
+    return { text, segments };
   } catch (error) {
     startupLog(`轉錄失敗 (${error.code || "unknown"}): ${error.diagnostics || error.stack || error.message}`);
     throw error;

@@ -104,10 +104,20 @@ async function run() {
   await evaluate(window, () => {
     window.__COURSE_CAPTURE_TEST_TRANSCRIBE__ = async (payload) => {
       window.__COURSE_CAPTURE_TEST_UPLOAD_PAYLOAD__ = { sourceId: payload.sourceId || "", hasBytes: Boolean(payload.bytes), extension: payload.extension || "" };
+      window.__COURSE_CAPTURE_TEST_PUSH_TRANSCRIPT__?.([{ time: 0, text: "即時顯示的第一句。" }]);
+      window.__COURSE_CAPTURE_TEST_SET_PROGRESS__?.({ stage: "transcribe", detail: "測試轉錄進度", progress: 42 });
+      await new Promise((resolve) => setTimeout(resolve, 150));
       return { text: "上傳音訊測試。", segments: [{ time: 0, text: "上傳音訊測試。" }] };
     };
     document.querySelector("[data-transcribe]").click();
   });
+  await waitFor(window, () => document.querySelector("[data-transcript]")?.textContent.includes("即時顯示的第一句"), "轉錄中的逐字稿沒有立即顯示");
+  const uploadLive = await evaluate(window, () => ({
+    partialVisible: document.querySelector("[data-transcript]")?.textContent.includes("即時顯示的第一句"),
+    progressPercent: document.querySelector("[data-progress-percent]")?.textContent || "",
+    progressWidth: document.querySelector("[data-progress-bar]")?.style.width || "",
+  }));
+  if (!uploadLive.partialVisible || uploadLive.progressPercent !== "42%" || uploadLive.progressWidth !== "42%") fail(`轉錄即時顯示或百分比錯誤：${JSON.stringify(uploadLive)}`);
   await waitFor(window, () => document.querySelector("[data-notes-button]")?.disabled === false, "上傳音訊轉錄未完成");
   const uploadTranscript = await evaluate(window, () => ({
     payload: window.__COURSE_CAPTURE_TEST_UPLOAD_PAYLOAD__,
@@ -169,7 +179,7 @@ async function run() {
   }));
   if (!notesReady.hasHeading || !notesReady.hasBullet || !notesReady.copyEnabled) fail("課程筆記未完成整理");
 
-  console.log(JSON.stringify({ initial, uploadCanceled, uploaded, uploadTranscript, recordingSaved, transcriptReady, notesReady, exportedFiles }));
+  console.log(JSON.stringify({ initial, uploadCanceled, uploaded, uploadLive, uploadTranscript, recordingSaved, transcriptReady, notesReady, exportedFiles }));
   exitAfterTest(0);
 }
 

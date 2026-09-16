@@ -27,11 +27,11 @@
           <label><span>語言</span><select data-language><option value="zh-TW">繁體中文</option><option value="zh-CN">簡體中文</option><option value="en-US">English</option><option value="ja-JP">日本語</option></select></label>
           <div class="record-actions"><button class="record" data-record><span data-record-icon>●</span><span data-record-label>開始錄製</span></button><button class="upload" data-upload type="button">上傳錄音／影音</button></div>
         </div>
-        <p class="help">開始後直接錄製主要桌面與 Windows 系統聲音，不會再跳出無法操作的選擇視窗；請先把課程放在主要螢幕。逐字稿會在錄製結束後才開始產生。</p>
+        <p class="help">開始後直接錄製主要桌面與 Windows 系統聲音，不會再跳出無法操作的選擇視窗；請先把課程放在主要螢幕。課後轉錄時，每完成一段就會立即顯示逐字稿。</p>
         <div class="source-info" data-source-info hidden><span class="source-badge">目前來源</span><strong data-source-name></strong><span data-source-meta></span></div>
       </section>
 
-      <section class="progress-card" data-progress-card hidden><div class="progress-top"><span data-progress-stage>準備中</span><b data-progress-copy>正在處理課程錄影</b></div><div class="progress-track"><i data-progress-bar></i></div></section>
+      <section class="progress-card" data-progress-card hidden><div class="progress-top"><span data-progress-stage>準備中</span><b data-progress-copy>正在處理課程錄影</b><strong data-progress-percent>0%</strong></div><div class="progress-track"><i data-progress-bar></i></div></section>
 
       <div class="grid">
         <section class="panel"><div class="panel-head"><div><p class="eyebrow">2 · TRANSCRIBE</p><h2>課後逐字稿</h2></div><span data-word-count>0 字</span></div><div class="empty" data-transcript><span>◎</span><b>錄製或上傳檔案後開始轉錄</b><p>Whisper 會在這台電腦處理完整音訊；第一次需下載模型。</p></div><div class="panel-actions"><button data-transcribe disabled>使用 Whisper 轉錄</button><button data-export disabled>匯出來源檔</button></div></section>

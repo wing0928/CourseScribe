@@ -11,4 +11,5 @@ contextBridge.exposeInMainWorld("courseCapture", {
   exportRecording: (payload) => ipcRenderer.invoke("recording:export", payload),
   exportImportedMedia: (payload) => ipcRenderer.invoke("recording:export-imported", payload),
   onProgress: (listener) => ipcRenderer.on("whisper:progress", (_event, data) => listener(data)),
+  onTranscript: (listener) => ipcRenderer.on("whisper:transcript", (_event, data) => listener(data)),
 });

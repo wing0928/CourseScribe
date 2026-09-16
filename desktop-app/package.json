@@ -1,6 +1,6 @@
 {
   "name": "course-capture-desktop",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
   "description": "本機 Whisper 課程錄製與課後筆記桌面應用程式",
   "main": "main.cjs",
@@ -28,6 +28,8 @@
     "asar": true,
     "files": [
       "**/*",
+      "!release*/**",
+      "!verified-release*/**",
       "!node_modules/onnxruntime-node/bin/napi-v6/darwin/**",
       "!node_modules/onnxruntime-node/bin/napi-v6/linux/**",
       "!node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**",

@@ -6,12 +6,12 @@ const els = {
   transcript: $("[data-transcript]"), wordCount: $("[data-word-count]"), transcribe: $("[data-transcribe]"),
   export: $("[data-export]"), notes: $("[data-notes]"), notesButton: $("[data-notes-button]"), copy: $("[data-copy]"),
   status: $("[data-status]"), progressCard: $("[data-progress-card]"), progressStage: $("[data-progress-stage]"),
-  progressCopy: $("[data-progress-copy]"), progressBar: $("[data-progress-bar]"),
+  progressCopy: $("[data-progress-copy]"), progressPercent: $("[data-progress-percent]"), progressBar: $("[data-progress-bar]"),
 };
 const state = {
   stream: null, recorder: null, chunks: [], recording: null,
   sourceId: "", sourceName: "", sourceExtension: "", sourceMimeType: "", sourceKind: "", sourceSize: 0,
-  transcript: [], notesText: "",
+  transcript: [], notesText: "", transcribing: false,
 };
 
 function cleanTitle() { return els.title.value.trim() || "未命名課程"; }
@@ -27,10 +27,14 @@ function setProgress(data) {
   els.progressCard.hidden = false;
   els.progressStage.textContent = data.stage === "model" ? "WHISPER MODEL" : data.stage === "audio" ? "AUDIO" : "TRANSCRIBE";
   els.progressCopy.textContent = data.detail || "正在處理";
-  els.progressBar.style.width = data.progress == null ? "18%" : `${Math.max(4, data.progress)}%`;
+  const progress = Number(data.progress);
+  const hasProgress = Number.isFinite(progress);
+  const safeProgress = hasProgress ? Math.min(100, Math.max(0, Math.round(progress))) : 0;
+  els.progressPercent.textContent = hasProgress ? `${safeProgress}%` : "處理中";
+  els.progressBar.style.width = `${hasProgress ? safeProgress : 8}%`;
 }
 function resetResults() {
-  state.transcript = []; state.notesText = ""; els.wordCount.textContent = "0 字";
+  state.transcript = []; state.notesText = ""; state.transcribing = false; els.wordCount.textContent = "0 字";
   els.transcript.className = "empty";
   els.transcript.innerHTML = "<span>◎</span><b>來源準備好後開始轉錄</b><p>Whisper 會在這台電腦處理完整音訊；第一次需下載模型。</p>";
   els.notes.className = "empty";
@@ -43,18 +47,38 @@ function setSource({ blob = null, sourceId = "", name = "課程錄音", extensio
   state.sourceKind = kind; state.sourceSize = Number.isFinite(size) && size >= 0 ? size : blob?.size || 0;
   els.sourceInfo.hidden = false; els.sourceName.textContent = state.sourceName;
   els.sourceMeta.textContent = `${kind === "upload" ? "上傳檔案" : "本機錄製"} · ${formatBytes(state.sourceSize)}`;
-  els.transcribe.disabled = false; els.export.disabled = false; resetResults();
+  els.transcribe.disabled = false; els.export.disabled = false; els.progressCard.hidden = true; resetResults();
 }
 function clearSource() {
   state.recording = null; state.sourceId = ""; state.sourceName = ""; state.sourceExtension = ""; state.sourceMimeType = "";
-  state.sourceKind = ""; state.sourceSize = 0; els.sourceInfo.hidden = true; els.transcribe.disabled = true; els.export.disabled = true; resetResults();
+  state.sourceKind = ""; state.sourceSize = 0; els.sourceInfo.hidden = true; els.transcribe.disabled = true; els.export.disabled = true; els.progressCard.hidden = true; resetResults();
 }
 function showTranscript() {
-  if (!state.transcript.length) return;
+  if (!state.transcript.length) {
+    if (state.transcribing) {
+      els.transcript.className = "transcript transcript-waiting";
+      els.transcript.innerHTML = "<span>◌</span><b>正在等待第一段逐字稿…</b><p>Whisper 完成一段音訊後會立即顯示在這裡。</p>";
+    }
+    els.notesButton.disabled = true;
+    return;
+  }
   els.transcript.className = "transcript";
   els.transcript.innerHTML = state.transcript.map((item) => `<div><time>${clock(item.time)}</time><p>${escapeHtml(item.text)}</p></div>`).join("");
   els.wordCount.textContent = `${state.transcript.reduce((sum, item) => sum + item.text.replace(/\s/g, "").length, 0)} 字`;
-  els.notesButton.disabled = false;
+  els.notesButton.disabled = state.transcribing;
+  els.transcript.scrollTop = els.transcript.scrollHeight;
+}
+function appendTranscript(segments) {
+  if (!Array.isArray(segments)) return;
+  for (const item of segments) {
+    const text = String(item?.text || "").trim();
+    if (!text) continue;
+    const time = Number.isFinite(Number(item?.time)) ? Number(item.time) : 0;
+    const duplicate = state.transcript.some((existing) => existing.text === text && Math.abs(Number(existing.time || 0) - time) < 5);
+    if (!duplicate) state.transcript.push({ time, text });
+  }
+  state.transcript.sort((left, right) => left.time - right.time);
+  showTranscript();
 }
 function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[c]); }
 async function chooseSource() {
@@ -111,7 +135,8 @@ async function uploadMedia() {
 }
 async function transcribe() {
   if (!state.recording && !state.sourceId) return;
-  els.transcribe.disabled = true; setProgress({ stage: "audio", detail: `正在準備${state.sourceKind === "upload" ? "上傳檔案" : "完整課程錄影"}` }); setStatus("Whisper 正在處理完整課程，請保持應用程式開啟。");
+  state.transcribing = true; state.transcript = []; state.notesText = ""; els.notesButton.disabled = true; els.copy.disabled = true;
+  els.transcribe.disabled = true; setProgress({ stage: "audio", detail: `正在準備${state.sourceKind === "upload" ? "上傳檔案" : "完整課程錄影"}（0%）`, progress: 0 }); showTranscript(); setStatus("Whisper 正在轉錄，完成一段就會立即顯示在逐字稿區。");
   try {
     const transcribeRecording = window.__COURSE_CAPTURE_TEST_TRANSCRIBE__ || window.courseCapture.transcribeRecording;
     const payload = { language: els.language.value };
@@ -119,8 +144,8 @@ async function transcribe() {
     else { payload.bytes = await state.recording.arrayBuffer(); payload.extension = state.sourceExtension || "webm"; payload.fileName = state.sourceName; payload.mimeType = state.sourceMimeType; }
     const result = await transcribeRecording(payload);
     state.transcript = result.segments?.length ? result.segments : result.text ? [{ time: 0, text: result.text }] : [];
-    showTranscript(); els.progressCard.hidden = true; setStatus(state.transcript.length ? "逐字稿完成，可以整理課程重點。" : "Whisper 沒有辨識到可用文字，請確認來源包含清楚的課程聲音。");
-  } catch (error) { els.progressCard.hidden = true; els.transcribe.disabled = false; setStatus(`轉錄失敗：${error.message || "請再試一次"}`); }
+    state.transcribing = false; showTranscript(); setProgress({ stage: "transcribe", detail: "轉錄完成（100%）", progress: 100 }); setStatus(state.transcript.length ? "逐字稿完成，可以整理課程重點。" : "Whisper 沒有辨識到可用文字，請確認來源包含清楚的課程聲音。");
+  } catch (error) { state.transcribing = false; showTranscript(); els.progressCard.hidden = true; els.transcribe.disabled = false; setStatus(`轉錄失敗：${error.message || "請再試一次"}`); }
 }
 async function exportSource() {
   if (!state.recording && !state.sourceId) return;
@@ -154,3 +179,10 @@ els.record.addEventListener("click", () => state.recorder?.state === "recording"
 els.upload.addEventListener("click", uploadMedia); els.transcribe.addEventListener("click", transcribe); els.export.addEventListener("click", exportSource);
 els.notesButton.addEventListener("click", makeNotes); els.copy.addEventListener("click", async () => { await navigator.clipboard.writeText(state.notesText); setStatus("筆記已複製到剪貼簿。"); });
 window.courseCapture.onProgress(setProgress);
+window.courseCapture.onTranscript((data) => {
+  if (!state.transcribing) return;
+  appendTranscript(data?.segments);
+  if (data?.progress != null) setProgress({ stage: "transcribe", detail: `已完成 ${data.progress}%${data.done ? "，正在整理逐字稿" : ""}`, progress: data.progress });
+});
+window.__COURSE_CAPTURE_TEST_PUSH_TRANSCRIPT__ = appendTranscript;
+window.__COURSE_CAPTURE_TEST_SET_PROGRESS__ = setProgress;
