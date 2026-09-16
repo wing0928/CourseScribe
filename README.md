@@ -4,10 +4,11 @@ CourseScribe 是 Windows 桌面版線上課程錄製與課後整理工具。它�
 
 ## 目前版本
 
-`0.1.6`
+`0.1.7`
 
 - 一鍵錄製主要桌面畫面、Windows 系統音訊與麥克風
 - 上傳 MP4、WebM、MOV、MKV、MP3、WAV、M4A、AAC、OGG、FLAC 等錄音或影音檔
+- 修正可攜版 ffmpeg 路徑，新增影音檔可正常抽取音訊並轉錄
 - 課後以本機 Whisper `whisper-small`（CPU / q4）轉錄，不需要付費 API
 - 產生逐字稿、關鍵字與課程筆記
 - 錄影檔使用時間戳命名，避免覆蓋上一堂課

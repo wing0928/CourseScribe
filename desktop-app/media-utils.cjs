@@ -1,4 +1,5 @@
 const { spawn } = require("node:child_process");
+const fs = require("node:fs");
 
 const AUDIO_EXTENSIONS = Object.freeze(["mp3", "wav", "m4a", "aac", "ogg", "oga", "opus", "flac", "wma", "aiff", "aif"]);
 const VIDEO_EXTENSIONS = Object.freeze(["mp4", "webm", "mov", "mkv", "avi", "mpeg", "mpg", "m4v", "3gp", "ts"]);
@@ -57,9 +58,20 @@ function createFfmpegError(stderr, exitCode) {
   return error;
 }
 
+function resolveExecutablePath(filePath) {
+  const originalPath = String(filePath || "");
+  const unpackedPath = originalPath.replace(/app\.asar([\\/])/, "app.asar.unpacked$1");
+
+  // Electron virtualizes normal files inside app.asar, but Windows cannot spawn
+  // an executable from that virtual path. electron-builder places the executable
+  // in app.asar.unpacked according to the asarUnpack rule.
+  return unpackedPath !== originalPath && fs.existsSync(unpackedPath) ? unpackedPath : originalPath;
+}
+
 function runFfmpeg(ffmpegPath, args) {
   return new Promise((resolve, reject) => {
-    const child = spawn(ffmpegPath, args, { windowsHide: true });
+    const executablePath = resolveExecutablePath(ffmpegPath);
+    const child = spawn(executablePath, args, { windowsHide: true });
     let stderr = "";
     child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
     child.on("error", (cause) => {
@@ -85,6 +97,7 @@ module.exports = {
   getMediaType,
   buildAudioTranscodeArgs,
   createFfmpegError,
+  resolveExecutablePath,
   runFfmpeg,
   transcodeMediaToWav,
 };

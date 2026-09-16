@@ -3,7 +3,7 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const ffmpegPath = require("ffmpeg-static");
-const { getMediaType, buildAudioTranscodeArgs, runFfmpeg, transcodeMediaToWav } = require("../media-utils.cjs");
+const { getMediaType, buildAudioTranscodeArgs, resolveExecutablePath, runFfmpeg, transcodeMediaToWav } = require("../media-utils.cjs");
 
 async function run() {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "course-scribe-media-import-"));
@@ -11,6 +11,12 @@ async function run() {
     assert.equal(getMediaType("m4a"), "audio");
     assert.equal(getMediaType("MP4"), "video");
     assert.equal(getMediaType("pdf"), null);
+
+    const virtualFfmpegPath = path.join(tempRoot, "resources", "app.asar", "node_modules", "ffmpeg-static", "ffmpeg.exe");
+    const unpackedFfmpegPath = path.join(tempRoot, "resources", "app.asar.unpacked", "node_modules", "ffmpeg-static", "ffmpeg.exe");
+    await fs.mkdir(path.dirname(unpackedFfmpegPath), { recursive: true });
+    await fs.writeFile(unpackedFfmpegPath, "test");
+    assert.equal(resolveExecutablePath(virtualFfmpegPath), unpackedFfmpegPath, "封裝版應從 app.asar.unpacked 執行 ffmpeg");
 
     const audioInput = path.join(tempRoot, "lesson-audio.m4a");
     const audioOutput = path.join(tempRoot, "lesson-audio.wav");
