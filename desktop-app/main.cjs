@@ -1,382 +1,982 @@
 const { app } = require("electron");
 
-// Apply the fallback before creating the first window. Some Windows graphics
-// drivers fail before Electron's first paint.
+// Keep the first paint reliable on Windows machines with problematic GPU drivers.
 app.disableHardwareAcceleration();
 
-const { BrowserWindow, ipcMain, dialog, desktopCapturer, session } = require("electron");
+const {
+  BrowserWindow,
+  ipcMain,
+  dialog,
+  desktopCapturer,
+  session,
+  protocol,
+  net,
+  shell,
+} = require("electron");
 const path = require("node:path");
 const fs = require("node:fs/promises");
+const fsSync = require("node:fs");
 const os = require("node:os");
-const { randomUUID } = require("node:crypto");
+const { randomUUID, createHash } = require("node:crypto");
+const { pathToFileURL } = require("node:url");
 const ffmpegPath = require("ffmpeg-static");
 const { WaveFile } = require("wavefile");
-const { SUPPORTED_MEDIA_EXTENSIONS, normalizeMediaExtension, getMediaType, transcodeMediaToWav } = require("./media-utils.cjs");
+const {
+  SUPPORTED_MEDIA_EXTENSIONS,
+  normalizeMediaExtension,
+  getMediaType,
+  transcodeMediaToWav,
+} = require("./media-utils.cjs");
+const { CourseDatabase, COURSE_STATUSES } = require("./database.cjs");
+const {
+  OllamaClient,
+  DEFAULT_MODEL,
+  HIGH_QUALITY_MODEL,
+  AVAILABLE_MODELS,
+  buildNotePrompt,
+  normalizeNoteShape,
+} = require("./ollama.cjs");
+const { toTraditionalTaiwan, normalizeNotes } = require("./text-utils.cjs");
+const APP_VERSION = require("./package.json").version;
+const TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
-let mainWindow;
-let whisperPipeline;
-let whisperLoad;
-const captureSources = new Map();
-let selectedCaptureSource = null;
-const importedMedia = new Map();
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  protocol.registerSchemesAsPrivileged([{
+    scheme: "coursescribe-media",
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true },
+  }]);
 
-function startupLog(message) {
-  const line = `[${new Date().toISOString()}] ${message}\n`;
-  console.error(line.trim());
-  if (app.isReady()) {
-    fs.appendFile(path.join(app.getPath("userData"), "startup.log"), line).catch(() => {});
+  let mainWindow;
+  let widgetWindow;
+  let recordingWidgetState = { visible: false, recording: false, paused: false, elapsedMs: 0, title: "" };
+  let courseDb;
+  let libraryRoot;
+  let stagingRoot;
+  let whisperPipeline;
+  let whisperLoad;
+  let ollama;
+  let selectedCaptureSource = null;
+  const captureSources = new Map();
+  const pendingImports = new Map();
+  const liveSessions = new Map();
+  const activeJobs = new Map();
+
+  function startupLog(message) {
+    const line = `[${new Date().toISOString()}] ${String(message || "")}\n`;
+    console.error(line.trim());
+    if (app.isReady()) fs.appendFile(path.join(app.getPath("userData"), "startup.log"), line).catch(() => {});
   }
-}
 
-function clearImportedMediaForSender(senderId) {
-  for (const [id, media] of importedMedia.entries()) {
-    if (media.senderId === senderId) importedMedia.delete(id);
+  function publicMedia(media) {
+    if (!media) return null;
+    const result = { ...media };
+    delete result.file_path;
+    delete result.filePath;
+    result.mediaType = result.media_type;
+    result.originalName = result.original_name;
+    result.processingStatus = result.processing_status;
+    result.durationMs = result.duration_ms;
+    result.mediaUrl = result.media_type === "video" && result.processing_status === "ready"
+      ? `coursescribe-media://media/${encodeURIComponent(result.id)}`
+      : null;
+    return result;
   }
-}
 
-function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 1040,
-    height: 760,
-    minWidth: 760,
-    minHeight: 620,
-    backgroundColor: "#08111e",
-    title: "課間捕手",
-    show: true,
-    webPreferences: { preload: path.join(__dirname, "preload.cjs"), contextIsolation: true, nodeIntegration: false },
-  });
-  mainWindow.once("ready-to-show", () => { mainWindow.show(); mainWindow.focus(); });
-  mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
-    if (level >= 2) startupLog(`畫面錯誤: ${message} (${sourceId}:${line})`);
-  });
-  mainWindow.webContents.on("render-process-gone", (_event, details) => {
-    startupLog(`畫面程序停止: ${details.reason} (${details.exitCode})`);
-  });
-  mainWindow.webContents.on("did-fail-load", (_event, code, description, url) => {
-    startupLog(`畫面載入失敗 (${code}): ${description} — ${url}`);
-  });
-  mainWindow.on("unresponsive", () => startupLog("應用程式視窗沒有回應"));
-  const senderId = mainWindow.webContents.id;
-  mainWindow.webContents.once("destroyed", () => clearImportedMediaForSender(senderId));
-  mainWindow.loadFile(path.join(__dirname, "index.html")).catch((error) => {
-    startupLog(`無法開啟主畫面: ${error.stack || error.message}`);
-    mainWindow.show();
-  });
-}
+  function publicCourse(course) {
+    if (!course) return null;
+    return {
+      ...course,
+      categoryId: course.category_id,
+      categoryName: course.category_name,
+      segmentCount: Number(course.segment_count || 0),
+      mediaCount: Number(course.media_count || 0),
+      mediaTypes: course.media_types ? String(course.media_types).split(",") : [],
+    };
+  }
 
-function safeBaseName(value) {
-  return String(value || "course").replace(/[\\/:*?"<>|]/g, "-").slice(0, 48);
-}
+  function publicSegment(segment) {
+    return {
+      id: segment.id,
+      mediaId: segment.media_id || segment.mediaId || null,
+      startMs: Number(segment.start_ms ?? segment.startMs ?? 0),
+      endMs: segment.end_ms == null && segment.endMs == null ? null : Number(segment.end_ms ?? segment.endMs),
+      text: String(segment.text || ""),
+      language: segment.language || null,
+    };
+  }
 
-function recordingStamp(date = new Date()) {
-  return `${date.toISOString().slice(0, 10)}-${date.toTimeString().slice(0, 8).replace(/:/g, "")}`;
-}
+  function publicDetail(detail) {
+    if (!detail) return null;
+    return {
+      course: publicCourse(detail.course),
+      media: detail.media.map(publicMedia),
+      segments: detail.segments.map(publicSegment),
+      notes: detail.notes ? { ...detail.notes, json: detail.notes.json ? normalizeNoteShape(detail.notes.json) : null } : null,
+      terms: detail.terms || [],
+    };
+  }
 
-function toBuffer(value) {
-  if (Buffer.isBuffer(value)) return value;
-  if (value instanceof Uint8Array) return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
-  if (value instanceof ArrayBuffer) return Buffer.from(value);
-  if (Array.isArray(value)) return Buffer.from(value);
-  if (value && Array.isArray(value.data)) return Buffer.from(value.data);
-  throw new Error("找不到可讀取的檔案內容");
-}
+  function senderCanReceive(sender) { return Boolean(sender && !sender.isDestroyed?.()); }
 
-function fileTypeLabel(mediaType) {
-  return mediaType === "video" ? "影片" : "錄音";
-}
+  function send(channel, payload, sender = mainWindow?.webContents) {
+    if (senderCanReceive(sender)) sender.send(channel, payload);
+  }
 
-function emitProgress(sender, stage, detail, progress) {
-  if (!sender || sender.isDestroyed?.()) return;
-  const numericProgress = Number(progress);
-  const safeProgress = Number.isFinite(numericProgress) ? Math.min(100, Math.max(0, Math.round(numericProgress))) : null;
-  sender.send("whisper:progress", { stage, detail, progress: safeProgress });
-}
+  function emitProgress(courseId, stage, detail, progress, extra = {}) {
+    const numeric = Number(progress);
+    send("course:progress", {
+      courseId: courseId || null,
+      stage,
+      detail: String(detail || ""),
+      progress: Number.isFinite(numeric) ? Math.max(0, Math.min(100, Math.round(numeric))) : null,
+      ...extra,
+    });
+  }
 
-function emitTranscript(sender, segments, progress, done = false) {
-  if (!sender || sender.isDestroyed?.()) return;
-  const numericProgress = Number(progress);
-  const safeProgress = Number.isFinite(numericProgress) ? Math.min(100, Math.max(0, Math.round(numericProgress))) : null;
-  sender.send("whisper:transcript", { segments, progress: safeProgress, done });
-}
+  function emitUpdated(courseId, reason = "updated") { send("course:updated", { courseId, reason }); }
 
-async function getWhisper(sender) {
-  if (whisperPipeline) return whisperPipeline;
-  if (!whisperLoad) {
-    whisperLoad = (async () => {
-      emitProgress(sender, "model", "正在準備 Whisper 模型", 0);
-      const { pipeline, env } = await import("@huggingface/transformers");
-      env.cacheDir = path.join(app.getPath("userData"), "whisper-models");
-      whisperPipeline = await pipeline("automatic-speech-recognition", "onnx-community/whisper-small", {
-        dtype: "q4",
-        device: "cpu",
-        progress_callback: (item) => emitProgress(sender, "model", item?.file || "正在下載 Whisper 模型", item?.progress),
+  function emitModelProgress(model, data) {
+    const completed = Number(data?.completed);
+    const total = Number(data?.total);
+    const progress = total > 0 ? Math.round((completed / total) * 100) : null;
+    send("model:progress", {
+      model,
+      status: data?.status || "downloading",
+      detail: data?.digest ? String(data.digest).slice(0, 18) : "",
+      progress: Number.isFinite(progress) ? Math.max(0, Math.min(100, progress)) : null,
+    });
+  }
+
+  function safeBaseName(value) {
+    return String(value || "course").replace(/[\\/:*?"<>|]/g, "-").replace(/\s+/g, " ").trim().slice(0, 64) || "course";
+  }
+
+  function recordingStamp(date = new Date()) {
+    return `${date.toISOString().slice(0, 10)}-${date.toTimeString().slice(0, 8).replace(/:/g, "")}`;
+  }
+
+  function toBuffer(value) {
+    if (Buffer.isBuffer(value)) return value;
+    if (value instanceof Uint8Array) return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+    if (value instanceof ArrayBuffer) return Buffer.from(value);
+    if (Array.isArray(value)) return Buffer.from(value);
+    if (value && Array.isArray(value.data)) return Buffer.from(value.data);
+    throw new Error("找不到可讀取的檔案內容");
+  }
+
+  function fileTypeLabel(mediaType) { return mediaType === "video" ? "影片" : "錄音"; }
+
+  function languageName(code) {
+    return { "zh-TW": "chinese", "zh-CN": "chinese", "en-US": "english", "ja-JP": "japanese" }[code] || "chinese";
+  }
+
+  function hashFile(filePath) {
+    return new Promise((resolve, reject) => {
+      const hash = createHash("sha256");
+      const stream = fsSync.createReadStream(filePath);
+      stream.on("data", (chunk) => hash.update(chunk));
+      stream.on("error", reject);
+      stream.on("end", () => resolve(hash.digest("hex")));
+    });
+  }
+
+  async function uniqueLibraryPath(courseId, originalName) {
+    const extension = normalizeMediaExtension(path.extname(originalName)) || "webm";
+    const folder = path.join(libraryRoot, safeBaseName(courseId));
+    await fs.mkdir(folder, { recursive: true });
+    const target = path.join(folder, `${safeBaseName(path.basename(originalName, path.extname(originalName)))}-${randomUUID()}.${extension}`);
+    return { target, extension };
+  }
+
+  async function moveIntoLibrary(sourcePath, courseId, originalName) {
+    const { target, extension } = await uniqueLibraryPath(courseId, originalName);
+    const tempTarget = `${target}.partial`;
+    let sourceStats = await fs.stat(sourcePath);
+    if (!sourceStats.isFile() || sourceStats.size <= 0) throw new Error("來源檔案是空白或無法讀取。");
+    try {
+      await fs.rename(sourcePath, target);
+    } catch (error) {
+      if (error.code !== "EXDEV") throw error;
+      await fs.copyFile(sourcePath, tempTarget);
+      const copiedStats = await fs.stat(tempTarget);
+      if (copiedStats.size !== sourceStats.size) throw new Error("檔案移動驗證失敗，原始檔案已保留。");
+      const sourceHash = await hashFile(sourcePath);
+      const copiedHash = await hashFile(tempTarget);
+      if (sourceHash !== copiedHash) {
+        await removePathIfExists(tempTarget);
+        throw new Error("跨磁碟匯入的 SHA-256 驗證失敗，原始檔案已保留。");
+      }
+      await fs.rename(tempTarget, target);
+      await fs.unlink(sourcePath);
+    }
+    sourceStats = await fs.stat(target);
+    return { filePath: target, extension, size: sourceStats.size, sha256: await hashFile(target) };
+  }
+
+  async function removePathIfExists(filePath) {
+    if (!filePath) return;
+    try { await fs.rm(filePath, { force: true }); } catch (error) { startupLog(`清理暫存檔失敗: ${error.message}`); }
+  }
+
+  function createWindow() {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+      return mainWindow;
+    }
+    mainWindow = new BrowserWindow({
+      width: 1120,
+      height: 820,
+      minWidth: 820,
+      minHeight: 620,
+      backgroundColor: "#07111d",
+      title: "課間捕手 · CourseScribe",
+      show: false,
+      webPreferences: { preload: path.join(__dirname, "preload.cjs"), contextIsolation: true, nodeIntegration: false },
+    });
+    mainWindow.once("ready-to-show", () => { mainWindow.show(); mainWindow.focus(); });
+    mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+      if (level >= 2) startupLog(`畫面錯誤: ${message} (${sourceId}:${line})`);
+    });
+    mainWindow.webContents.on("render-process-gone", (_event, details) => startupLog(`畫面程序停止: ${details.reason} (${details.exitCode})`));
+    mainWindow.webContents.on("did-fail-load", (_event, code, description, url) => startupLog(`畫面載入失敗 (${code}): ${description} — ${url}`));
+    mainWindow.on("unresponsive", () => startupLog("應用程式視窗沒有回應"));
+    mainWindow.on("closed", () => { mainWindow = null; });
+    mainWindow.loadFile(path.join(__dirname, "index.html")).catch((error) => startupLog(`無法開啟主畫面: ${error.stack || error.message}`));
+    return mainWindow;
+  }
+
+  function sendWidgetState() {
+    if (widgetWindow && !widgetWindow.isDestroyed()) {
+      widgetWindow.webContents.send("widget:state", recordingWidgetState);
+    }
+  }
+
+  function createRecordingWidget() {
+    if (widgetWindow && !widgetWindow.isDestroyed()) {
+      widgetWindow.show();
+      widgetWindow.focus();
+      sendWidgetState();
+      return widgetWindow;
+    }
+    widgetWindow = new BrowserWindow({
+      width: 318,
+      height: 116,
+      minWidth: 286,
+      minHeight: 104,
+      maxWidth: 420,
+      maxHeight: 150,
+      frame: false,
+      transparent: true,
+      resizable: true,
+      alwaysOnTop: true,
+      skipTaskbar: false,
+      show: false,
+      title: "CourseScribe 錄影工具",
+      webPreferences: { preload: path.join(__dirname, "preload.cjs"), contextIsolation: true, nodeIntegration: false },
+    });
+    widgetWindow.setAlwaysOnTop(true, "floating");
+    widgetWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    widgetWindow.webContents.once("did-finish-load", () => {
+      widgetWindow.show();
+      setTimeout(sendWidgetState, 0);
+    });
+    widgetWindow.on("closed", () => { widgetWindow = null; });
+    widgetWindow.loadFile(path.join(__dirname, "widget.html")).catch((error) => startupLog(`無法開啟錄影小工具: ${error.message}`));
+    return widgetWindow;
+  }
+
+  function getWhisper() {
+    if (whisperPipeline) return whisperPipeline;
+    if (!whisperLoad) {
+      whisperLoad = (async () => {
+        emitProgress(null, "model", "正在準備本機 Whisper 模型", 0);
+        const { pipeline, env } = await import("@huggingface/transformers");
+        env.cacheDir = path.join(app.getPath("userData"), "whisper-models");
+        whisperPipeline = await pipeline("automatic-speech-recognition", "onnx-community/whisper-small", {
+          dtype: "q4",
+          device: "cpu",
+          progress_callback: (item) => emitProgress(null, "model", item?.file || "正在下載 Whisper 模型", item?.progress),
+        });
+        emitProgress(null, "model", "本機 Whisper 模型已準備完成", 100);
+        return whisperPipeline;
+      })().catch((error) => {
+        startupLog(`Whisper 模型載入失敗: ${error.stack || error.message}`);
+        whisperLoad = null;
+        throw error;
       });
-      emitProgress(sender, "model", "Whisper 模型已準備完成", 100);
-      return whisperPipeline;
-    })().catch((error) => { startupLog(`Whisper 模型載入失敗: ${error.stack || error.message}`); whisperLoad = null; throw error; });
-  }
-  return whisperLoad;
-}
-
-function languageName(code) {
-  return { "zh-TW": "chinese", "zh-CN": "chinese", "en-US": "english", "ja-JP": "japanese" }[code] || "chinese";
-}
-
-function getImportedMedia(event, sourceId) {
-  const media = importedMedia.get(String(sourceId || ""));
-  if (!media || media.senderId !== event.sender.id) {
-    throw new Error("找不到已選取的影音檔，請重新上傳後再試一次。");
-  }
-  return media;
-}
-
-async function assertImportedMediaReadable(media) {
-  try {
-    const stats = await fs.stat(media.filePath);
-    if (!stats.isFile() || stats.size <= 0) throw new Error("selected file is not readable");
-    return stats;
-  } catch (error) {
-    startupLog(`無法讀取上傳檔案: ${error.stack || error.message}`);
-    throw new Error("無法讀取已選取的檔案；它可能已被移動、刪除或沒有存取權限，請重新選擇。");
-  }
-}
-
-async function chooseMediaFile(event) {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: "選擇錄音或影音檔",
-    properties: ["openFile"],
-    filters: [
-      { name: "影音與音訊檔", extensions: SUPPORTED_MEDIA_EXTENSIONS },
-      { name: "所有檔案", extensions: ["*"] },
-    ],
-  });
-  if (result.canceled || !result.filePaths?.[0]) return { canceled: true };
-
-  const filePath = result.filePaths[0];
-  const extension = normalizeMediaExtension(path.extname(filePath));
-  const mediaType = getMediaType(extension);
-  if (!mediaType) {
-    throw new Error("不支援這個檔案格式。請選擇 MP4、WebM、MOV、MKV、MP3、WAV、M4A、AAC、OGG 或 FLAC 檔案。");
+    }
+    return whisperLoad;
   }
 
-  let stats;
-  try {
-    stats = await fs.stat(filePath);
-  } catch (error) {
-    startupLog(`讀取選取檔案失敗: ${error.stack || error.message}`);
-    throw new Error("無法讀取已選取的檔案，請確認檔案仍在原本的位置。");
-  }
-  if (!stats.isFile() || stats.size <= 0) throw new Error("選取的檔案是空白或不是可讀取的檔案，請重新選擇。");
-
-  clearImportedMediaForSender(event.sender.id);
-  const id = randomUUID();
-  const name = path.basename(filePath);
-  importedMedia.set(id, { id, senderId: event.sender.id, filePath, name, size: stats.size, extension, mediaType });
-  startupLog(`已選取本機${fileTypeLabel(mediaType)}檔案: ${name} (${stats.size} bytes)`);
-  return { canceled: false, id, name, size: stats.size, extension, mediaType };
-}
-
-async function resolveTranscriptionSource(event, payload, tempRoot) {
-  if (payload?.sourceId) {
-    const media = getImportedMedia(event, payload.sourceId);
-    const stats = await assertImportedMediaReadable(media);
-    return { inputPath: media.filePath, name: media.name, size: stats.size, mediaType: media.mediaType };
+  function resampleFloat(input, sourceRate, targetRate = 16000) {
+    const source = input instanceof Float32Array ? input : Float32Array.from(input || []);
+    if (!source.length || sourceRate === targetRate) return source;
+    const length = Math.max(1, Math.round(source.length * targetRate / sourceRate));
+    const output = new Float32Array(length);
+    const ratio = sourceRate / targetRate;
+    for (let index = 0; index < length; index += 1) {
+      const position = index * ratio;
+      const left = Math.floor(position);
+      const right = Math.min(source.length - 1, left + 1);
+      const weight = position - left;
+      output[index] = source[left] * (1 - weight) + source[right] * weight;
+    }
+    return output;
   }
 
-  if (!payload?.bytes) throw new Error("找不到要轉錄的錄製檔");
-  let inputBytes;
-  try {
-    inputBytes = toBuffer(payload.bytes);
-  } catch {
-    throw new Error("錄製資料無法讀取，請重新錄製後再試一次。");
+  function normalizeWhisperText(text, modelLanguage, outputLanguage) {
+    const cleaned = String(text || "").replace(/\s+/g, modelLanguage === "english" ? " " : "").trim();
+    return modelLanguage === "chinese" && String(outputLanguage).toLowerCase().startsWith("zh-tw")
+      ? toTraditionalTaiwan(cleaned, "zh-TW")
+      : cleaned;
   }
-  if (!inputBytes.length) throw new Error("錄製檔案是空白，請確認錄製時有取得課程聲音。");
-  const extension = normalizeMediaExtension(payload.extension || "webm");
-  const mediaType = getMediaType(extension);
-  if (!mediaType) throw new Error("錄製檔案格式不受支援，請重新錄製後再試一次。");
-  const inputPath = path.join(tempRoot, `recording.${extension}`);
-  await fs.writeFile(inputPath, inputBytes);
-  return { inputPath, name: `錄製課程.${extension}`, size: inputBytes.length, mediaType };
-}
 
-async function transcribeRecording(event, payload = {}) {
-  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "course-capture-"));
-  const output = path.join(tempRoot, "recording.wav");
-  try {
-    const source = await resolveTranscriptionSource(event, payload, tempRoot);
-    startupLog(`開始轉錄，來源 ${source.name}，輸入大小 ${source.size} bytes，語言 ${payload.language || "zh-TW"}`);
-    emitProgress(event.sender, "audio", `正在從${fileTypeLabel(source.mediaType)}準備 16 kHz 單聲道音訊（0%）`, 0);
-    await transcodeMediaToWav({ ffmpegPath, inputPath: source.inputPath, outputPath: output });
-    const outputStats = await fs.stat(output);
-    if (outputStats.size <= 44) throw new Error(`「${source.name}」沒有可用的音訊內容。`);
-    startupLog(`ffmpeg 已完成 ${source.name} → 16 kHz mono WAV`);
-    const wav = new WaveFile(await fs.readFile(output));
+  async function recognizeAudio(audio, offsetMs, language, courseId) {
+    const transcriber = await getWhisper();
+    const modelLanguage = languageName(language);
+    const result = await transcriber(audio, { language: modelLanguage, task: "transcribe", return_timestamps: true });
+    const chunks = Array.isArray(result.chunks) && result.chunks.length
+      ? result.chunks
+      : (result.text ? [{ text: result.text, timestamp: [0, null] }] : []);
+    const segments = chunks.map((chunk) => {
+      const localStart = Number(chunk.timestamp?.[0]);
+      const localEnd = Number(chunk.timestamp?.[1]);
+      return {
+        startMs: Math.max(0, Math.round(offsetMs + (Number.isFinite(localStart) ? localStart * 1000 : 0))),
+        endMs: Number.isFinite(localEnd) ? Math.max(0, Math.round(offsetMs + localEnd * 1000)) : null,
+        text: normalizeWhisperText(chunk.text, modelLanguage, language),
+      };
+    }).filter((segment) => segment.text);
+    if (courseId) startupLog(`Whisper 完成課程 ${courseId} 的 ${segments.length} 個片段`);
+    return segments;
+  }
+
+  function loadWavSamples(wavBytes) {
+    const wav = new WaveFile(wavBytes);
     wav.toBitDepth("32f");
     wav.toSampleRate(16000);
     let samples = wav.getSamples();
     if (Array.isArray(samples)) samples = samples[0];
-    const audio = samples instanceof Float32Array ? samples : new Float32Array(samples);
-    startupLog(`音訊樣本準備完成，共 ${audio.length} samples`);
-    const transcriber = await getWhisper(event.sender);
-    const modelLanguage = languageName(payload.language);
-    const duration = audio.length / 16000;
-    if (!Number.isFinite(duration) || duration <= 0) throw new Error(`「${source.name}」沒有可用的音訊內容。`);
+    return samples instanceof Float32Array ? samples : new Float32Array(samples);
+  }
 
-    // Process short windows so the first completed Whisper window can be shown immediately.
-    // A small overlap helps preserve words that cross a window boundary.
-    const chunkLength = 20;
-    const overlap = 3;
-    const chunkCount = Math.max(1, Math.ceil(duration / chunkLength));
-    const segments = [];
-    emitProgress(event.sender, "transcribe", "Whisper 已準備完成，開始轉錄（0%）", 0);
-
-    const normalizeSegmentText = (text) => String(text || "").replace(/\s+/g, "").trim().toLowerCase();
-    const appendUniqueSegments = (target, candidates) => {
-      const added = [];
-      for (const candidate of candidates) {
-        const text = String(candidate.text || "").trim();
-        if (!text) continue;
-        const normalized = normalizeSegmentText(text);
-        const duplicate = target.some((existing) => normalizeSegmentText(existing.text) === normalized && Math.abs(Number(existing.time || 0) - Number(candidate.time || 0)) < 5);
-        if (duplicate) continue;
-        const segment = { time: Number(Number(candidate.time || 0).toFixed(2)), text };
-        target.push(segment);
-        added.push(segment);
+  async function transcribeFileCourse(courseId, mediaId, language, jobId) {
+    const media = courseDb.getMedia(mediaId);
+    if (!media) throw new Error("找不到要轉錄的媒體");
+    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "coursescribe-transcribe-"));
+    const wavPath = path.join(tempRoot, "audio.wav");
+    try {
+      courseDb.updateCourse(courseId, { status: "transcribing", error: null });
+      courseDb.updateJob(jobId, { status: "running", detail: "正在準備音訊", progress: 2 });
+      emitProgress(courseId, "audio", `正在準備${fileTypeLabel(media.media_type)}音訊`, 2);
+      await transcodeMediaToWav({ ffmpegPath, inputPath: media.file_path, outputPath: wavPath });
+      const audio = loadWavSamples(await fs.readFile(wavPath));
+      if (!audio.length) throw new Error("這個檔案沒有可用的音訊內容。");
+      const durationMs = Math.round(audio.length / 16000 * 1000);
+      const chunkMs = 20000;
+      const overlapMs = 2000;
+      let startMs = 0;
+      let chunkIndex = 0;
+      const total = Math.max(1, Math.ceil(durationMs / (chunkMs - overlapMs)));
+      while (startMs < durationMs || chunkIndex === 0) {
+        const baseEndMs = Math.min(durationMs, startMs + chunkMs);
+        const samples = audio.slice(Math.floor(startMs / 1000 * 16000), Math.floor(baseEndMs / 1000 * 16000));
+        const recognized = await recognizeAudio(samples, startMs, language, courseId);
+        courseDb.addSegments(courseId, mediaId, recognized, language);
+        chunkIndex += 1;
+        const progress = Math.min(100, Math.round(baseEndMs / durationMs * 100));
+        courseDb.updateJob(jobId, { status: "running", detail: `已完成第 ${chunkIndex}/${total} 段`, progress });
+        emitProgress(courseId, "transcribe", `正在轉錄第 ${chunkIndex}/${total} 段`, progress);
+        emitUpdated(courseId, "transcript");
+        if (baseEndMs >= durationMs) break;
+        startMs += chunkMs - overlapMs;
       }
-      target.sort((left, right) => left.time - right.time);
-      return added.sort((left, right) => left.time - right.time);
-    };
-
-    for (let index = 0; index < chunkCount; index += 1) {
-      const baseStart = index * chunkLength;
-      const baseEnd = Math.min(duration, baseStart + chunkLength);
-      const windowStart = Math.max(0, baseStart - overlap);
-      const startSample = Math.floor(windowStart * 16000);
-      const endSample = Math.min(audio.length, Math.ceil(baseEnd * 16000));
-      const windowAudio = audio.slice(startSample, endSample);
-      const beforeProgress = duration > 0 ? Math.round((baseStart / duration) * 100) : 0;
-      emitProgress(event.sender, "transcribe", `正在轉錄第 ${index + 1}/${chunkCount} 段（${beforeProgress}%）`, beforeProgress);
-
-      const result = await transcriber(windowAudio, { language: modelLanguage, task: "transcribe", return_timestamps: true });
-      const rawChunks = Array.isArray(result.chunks) && result.chunks.length ? result.chunks : (result.text ? [{ text: result.text, timestamp: [0, null] }] : []);
-      const candidates = rawChunks.map((chunk) => {
-        const rawStart = chunk.timestamp?.[0];
-        const rawEnd = chunk.timestamp?.[1];
-        const localStart = Number(rawStart);
-        const localEnd = rawEnd == null ? Number.NaN : Number(rawEnd);
-        return {
-          time: windowStart + (Number.isFinite(localStart) ? localStart : 0),
-          endTime: Number.isFinite(localEnd) ? windowStart + localEnd : null,
-          text: String(chunk.text || "").trim(),
-        };
-      }).filter((chunk) => chunk.text && (baseStart === 0 || chunk.endTime == null || chunk.endTime > baseStart + 0.25));
-      const added = appendUniqueSegments(segments, candidates);
-      const progress = duration > 0 ? Math.min(100, Math.round((baseEnd / duration) * 100)) : 100;
-      if (added.length) emitTranscript(event.sender, added, progress);
-      emitProgress(event.sender, "transcribe", `已完成 ${progress}%（第 ${index + 1}/${chunkCount} 段）`, progress);
+      const segmentCount = courseDb.listSegments(courseId).length;
+      if (!segmentCount) throw new Error("Whisper 沒有辨識到可用文字，請確認檔案包含清楚的課程聲音。");
+      courseDb.updateJob(jobId, { status: "completed", detail: "逐字稿完成", progress: 100 });
+      emitProgress(courseId, "transcribe", "逐字稿完成，準備整理課程筆記", 100);
+      return segmentCount;
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true });
     }
-
-    emitTranscript(event.sender, [], 100, true);
-    const text = modelLanguage === "english" ? segments.map((segment) => segment.text).join(" ") : segments.map((segment) => segment.text).join("");
-    startupLog(`Whisper 轉錄完成，${segments.length} 段，${text.replace(/\s/g, "").length} 字`);
-    return { text, segments };
-  } catch (error) {
-    startupLog(`轉錄失敗 (${error.code || "unknown"}): ${error.diagnostics || error.stack || error.message}`);
-    throw error;
-  } finally {
-    await fs.rm(tempRoot, { recursive: true, force: true });
   }
-}
 
-ipcMain.handle("app:log", (_event, message) => {
-  startupLog(String(message || ""));
-  return true;
-});
-
-ipcMain.handle("recording:save", async (_event, { bytes, courseTitle }) => {
-  const inputBytes = toBuffer(bytes);
-  const fileName = `${safeBaseName(courseTitle)}-${recordingStamp()}.webm`;
-  const target = path.join(app.getPath("videos"), fileName);
-  await fs.writeFile(target, inputBytes);
-  startupLog(`錄影已儲存: ${target} (${inputBytes.length} bytes)`);
-  return { saved: true, name: fileName, size: inputBytes.length };
-});
-
-ipcMain.handle("recording:choose-media", chooseMediaFile);
-ipcMain.handle("recording:transcribe", transcribeRecording);
-
-ipcMain.handle("recording:export", async (_event, { bytes, courseTitle }) => {
-  const date = new Date().toISOString().slice(0, 10);
-  const result = await dialog.showSaveDialog(mainWindow, { defaultPath: `${safeBaseName(courseTitle)}-${date}.webm`, filters: [{ name: "WebM 影片", extensions: ["webm"] }] });
-  if (result.canceled || !result.filePath) return { canceled: true };
-  await fs.writeFile(result.filePath, toBuffer(bytes));
-  return { canceled: false };
-});
-
-ipcMain.handle("recording:export-imported", async (event, { sourceId, courseTitle }) => {
-  const media = getImportedMedia(event, sourceId);
-  await assertImportedMediaReadable(media);
-  const date = new Date().toISOString().slice(0, 10);
-  const result = await dialog.showSaveDialog(mainWindow, {
-    defaultPath: `${safeBaseName(courseTitle)}-${date}.${media.extension}`,
-    filters: [{ name: `${fileTypeLabel(media.mediaType)}檔案`, extensions: [media.extension] }],
-  });
-  if (result.canceled || !result.filePath) return { canceled: true };
-  try {
-    await fs.copyFile(media.filePath, result.filePath);
-  } catch (error) {
-    startupLog(`匯出上傳檔案失敗: ${error.stack || error.message}`);
-    throw new Error("無法匯出原始檔案，請確認目的資料夾可寫入後再試一次。");
+  function textForCourse(courseId) {
+    return courseDb.listSegments(courseId).map((item) => {
+      const seconds = Math.max(0, Number(item.start_ms || 0)) / 1000;
+      const stamp = `${Math.floor(seconds / 60).toString().padStart(2, "0")}:${Math.floor(seconds % 60).toString().padStart(2, "0")}`;
+      return `[${stamp}] ${item.text}`;
+    }).join("\n");
   }
-  return { canceled: false };
-});
 
-ipcMain.handle("capture:list", async () => {
-  try {
-    const sources = await desktopCapturer.getSources({ types: ["screen", "window"], thumbnailSize: { width: 320, height: 180 } });
-    startupLog(`找到 ${sources.length} 個可錄製來源`);
-    captureSources.clear();
-    return sources.map((source) => {
-      captureSources.set(source.id, source);
-      return { id: source.id, name: source.name, thumbnail: source.thumbnail.toDataURL() };
+  function noteMarkdown(course, note) {
+    const list = (items) => (items || []).map((item) => `- ${item}`).join("\n") || "- 無資料";
+    return [
+      `# ${course.title}`, "", "## 課程摘要", note.summary || "無摘要", "",
+      "## 核心重點", list(note.keyPoints), "", "## 重要名詞／公式／定義", list(note.termsAndFormulas), "",
+      "## 容易混淆或需複習處", list(note.confusions), "", "## 課後複習問題", list(note.reviewQuestions), "",
+      "## 一句話總結", note.takeaway || "無總結",
+    ].join("\n");
+  }
+
+  async function generateJsonWithRepair(args) {
+    try {
+      return await ollama.generateJson(args);
+    } catch (error) {
+      if (error.code !== "OLLAMA_BAD_JSON") throw error;
+      const raw = String(error.raw || "").slice(0, 12000);
+      return ollama.generateJson({
+        ...args,
+        prompt: `上一個模型回覆不是有效 JSON。請只修復並輸出符合欄位要求的 JSON，不要補充不存在的課程內容。原始回覆如下：\n${raw}\n\n${args.prompt}`,
+      });
+    }
+  }
+
+  async function generateNotesForCourse(courseId, requestedModel = null) {
+    const course = courseDb.getCourse(courseId);
+    const transcript = textForCourse(courseId);
+    if (!course || !transcript.trim()) throw new Error("逐字稿尚未完成，無法整理課程筆記。");
+    const model = String(requestedModel || courseDb.getSetting("selectedOllamaModel", DEFAULT_MODEL));
+    if (!AVAILABLE_MODELS.some((item) => item.name === model)) throw new Error("尚未選擇有效的 Qwen 模型。");
+    courseDb.updateCourse(courseId, { status: "summarizing", model, error: null });
+    courseDb.saveNotes(courseId, { model, status: "processing", json: null, text: null, error: null });
+    emitProgress(courseId, "notes", "正在連線到本機 Ollama", 0, { model });
+    const status = await ollama.status();
+    if (!status.available) {
+      const error = new Error("找不到本機 Ollama。請先安裝並啟動 Ollama，再重試課程整理。");
+      error.code = "OLLAMA_UNAVAILABLE";
+      throw error;
+    }
+    if (!status.models.includes(model)) {
+      const error = new Error(`本機尚未下載 ${model}。請到模型設定下載後再試一次。`);
+      error.code = "OLLAMA_MODEL_MISSING";
+      throw error;
+    }
+    const chunks = [];
+    const maxChars = model === HIGH_QUALITY_MODEL ? 18000 : 11000;
+    for (let index = 0; index < transcript.length; index += maxChars) chunks.push(transcript.slice(index, index + maxChars));
+    const partials = [];
+    for (let index = 0; index < chunks.length; index += 1) {
+      const partPrompt = `${buildNotePrompt(chunks[index], course.title, course.language)}\n這是長課程的其中一段。請只整理本段實際出現的資訊，仍使用完整 JSON 欄位。`;
+      const result = await generateJsonWithRepair({ model, prompt: partPrompt, timeoutMs: 180000 });
+      partials.push(result.value);
+      emitProgress(courseId, "notes", `已整理第 ${index + 1}/${chunks.length} 段`, Math.round(((index + 1) / (chunks.length + 1)) * 80), { model });
+    }
+    const combined = partials.length === 1
+      ? partials[0]
+      : await generateJsonWithRepair({
+        model,
+        prompt: `${buildNotePrompt(JSON.stringify(partials), course.title, course.language)}\n以上是同一門長課程的分段整理。請去除重複、合併相同概念，只保留逐字稿可支持的內容，輸出完整最終 JSON。`,
+        timeoutMs: 240000,
+      }).then((result) => result.value);
+    const note = normalizeNotes(normalizeNoteShape(combined), course.language);
+    const saved = courseDb.saveNotes(courseId, { model, status: "ready", json: note, text: noteMarkdown(course, note), error: null });
+    courseDb.updateCourse(courseId, { status: "ready", model, error: null });
+    emitProgress(courseId, "notes", "課程筆記完成", 100, { model });
+    emitUpdated(courseId, "notes");
+    return saved;
+  }
+
+  async function runImportedPipeline(courseId, mediaId, language, jobId) {
+    try {
+      await transcribeFileCourse(courseId, mediaId, language, jobId);
+      await generateNotesForCourse(courseId);
+    } catch (error) {
+      startupLog(`課程處理失敗: ${error.stack || error.message}`);
+      courseDb.updateCourse(courseId, { status: "failed", error: error.message });
+      courseDb.updateJob(jobId, { status: "failed", error: error.message, detail: error.message });
+      courseDb.saveNotes(courseId, { status: "error", model: courseDb.getSetting("selectedOllamaModel", DEFAULT_MODEL), error: error.message });
+      emitProgress(courseId, "error", error.message, 100, { code: error.code || "COURSE_FAILED" });
+      emitUpdated(courseId, "failed");
+    } finally { activeJobs.delete(jobId); }
+  }
+
+  async function processLiveAudio(sessionState, samples, sampleRate, startMs) {
+    const audio = resampleFloat(samples, Number(sampleRate) || 16000, 16000);
+    const segments = await recognizeAudio(audio, Number(startMs) || 0, sessionState.language, sessionState.courseId);
+    courseDb.addSegments(sessionState.courseId, sessionState.mediaId, segments, sessionState.language);
+    sessionState.processedMs = Math.max(sessionState.processedMs, (Number(startMs) || 0) + Math.round(audio.length / 16));
+    const progress = sessionState.expectedMs > 0 ? Math.min(99, Math.round(sessionState.processedMs / sessionState.expectedMs * 100)) : null;
+    emitProgress(sessionState.courseId, "transcribe", "錄影中，背景轉錄已完成一段", progress, { live: true });
+    emitUpdated(sessionState.courseId, "transcript");
+  }
+
+  async function finishLiveSession(sessionState) {
+    let processingError = sessionState.error;
+    try { await sessionState.audioQueue; } catch (error) { processingError = processingError || error; }
+    try { await sessionState.videoQueue; } catch (error) { processingError = processingError || error; }
+    let media = null;
+    try {
+      const stats = await fs.stat(sessionState.tempVideo);
+      if (stats.size > 0) {
+        const moved = await moveIntoLibrary(sessionState.tempVideo, sessionState.courseId, `${safeBaseName(sessionState.title)}-${recordingStamp()}.webm`);
+        media = courseDb.upsertMedia({
+          id: sessionState.mediaId || randomUUID(), courseId: sessionState.courseId, filePath: moved.filePath,
+          originalName: sessionState.originalName, mimeType: "video/webm", mediaType: "video", extension: "webm",
+          size: moved.size, sha256: moved.sha256, processingStatus: "ready",
+        });
+      } else if (sessionState.mediaId) {
+        processingError = processingError || new Error("錄影沒有留下可用的影片檔。");
+        courseDb.updateMedia(sessionState.mediaId, { processingStatus: "failed", size: 0 });
+      }
+    } catch (error) { processingError = processingError || error; startupLog(`錄影檔整理失敗: ${error.stack || error.message}`); }
+    // moveIntoLibrary renames the staging file on success. If it failed, keep
+    // the partial recording so the next launch can recover it instead of
+    // silently deleting the only copy.
+    if (media) await removePathIfExists(sessionState.tempVideo);
+    else if (sessionState.mediaId) {
+      try {
+        const stats = await fs.stat(sessionState.tempVideo);
+        courseDb.updateMedia(sessionState.mediaId, { processingStatus: stats.size > 0 ? "interrupted" : "failed", size: stats.size });
+      } catch {}
+    }
+    if (media) {
+      courseDb.updateCourse(sessionState.courseId, { status: "transcribing", error: processingError ? processingError.message : null });
+    }
+    const segments = courseDb.listSegments(sessionState.courseId);
+    if (!processingError && segments.length) {
+      try { await generateNotesForCourse(sessionState.courseId, sessionState.model); }
+      catch (error) {
+        processingError = error;
+        courseDb.saveNotes(sessionState.courseId, { model: sessionState.model, status: "error", error: error.message });
+        startupLog(`錄影課程筆記失敗: ${error.stack || error.message}`);
+      }
+    }
+    if (processingError || !segments.length) {
+      const message = processingError?.message || "沒有辨識到可用文字，請確認錄影時有取得系統聲音。";
+      courseDb.updateCourse(sessionState.courseId, { status: "failed", error: message });
+      emitProgress(sessionState.courseId, "error", message, 100, { code: processingError?.code || "LIVE_TRANSCRIPTION_FAILED" });
+    } else {
+      courseDb.updateCourse(sessionState.courseId, { status: "ready", error: null });
+      emitProgress(sessionState.courseId, "complete", "錄影、逐字稿與課程筆記完成", 100);
+    }
+    emitUpdated(sessionState.courseId, "complete");
+    liveSessions.delete(sessionState.courseId);
+  }
+
+  async function chooseMediaFile(event) {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: "選擇錄音或影音檔", properties: ["openFile"],
+      filters: [{ name: "影音與音訊檔", extensions: SUPPORTED_MEDIA_EXTENSIONS }, { name: "所有檔案", extensions: ["*"] }],
     });
-  } catch (error) {
-    startupLog(`讀取錄製來源失敗: ${error.stack || error.message}`);
-    throw error;
+    if (result.canceled || !result.filePaths?.[0]) return { canceled: true };
+    const filePath = result.filePaths[0];
+    const extension = normalizeMediaExtension(path.extname(filePath));
+    const mediaType = getMediaType(extension);
+    if (!mediaType) throw new Error("不支援這個檔案格式，請選擇常見的影片、錄音或音訊檔。");
+    const stats = await fs.stat(filePath);
+    if (!stats.isFile() || stats.size <= 0) throw new Error("選取的檔案是空白或無法讀取。");
+    const sourceId = randomUUID();
+    pendingImports.set(sourceId, { senderId: event.sender.id, filePath, name: path.basename(filePath), extension, mediaType, size: stats.size });
+    return { canceled: false, sourceId, name: path.basename(filePath), extension, mediaType, size: stats.size };
   }
-});
 
-ipcMain.handle("capture:select", (_event, id) => {
-  selectedCaptureSource = captureSources.get(id) || null;
-  return Boolean(selectedCaptureSource);
-});
-
-ipcMain.handle("capture:select-desktop", async () => {
-  try {
-    const sources = await desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 1, height: 1 } });
-    selectedCaptureSource = sources[0] || null;
-    startupLog(selectedCaptureSource ? "已選擇主要桌面作為錄製來源" : "找不到可錄製的桌面來源");
-    return Boolean(selectedCaptureSource);
-  } catch (error) {
-    startupLog(`選擇桌面來源失敗: ${error.stack || error.message}`);
-    throw error;
+  function getPendingImport(event, sourceId) {
+    const item = pendingImports.get(String(sourceId || ""));
+    if (!item || item.senderId !== event.sender.id) throw new Error("找不到已選取的檔案，請重新選擇。");
+    return item;
   }
-});
 
-process.on("uncaughtException", (error) => startupLog(`未處理例外: ${error.stack || error.message}`));
-process.on("unhandledRejection", (error) => startupLog(`未處理 Promise: ${error?.stack || error}`));
+  function makeCourseInput(input = {}) {
+    return {
+      title: String(input.title || "未命名課程").trim().slice(0, 200) || "未命名課程",
+      source: String(input.source || "upload"),
+      language: String(input.language || "zh-TW"),
+      model: AVAILABLE_MODELS.some((item) => item.name === input.model) ? input.model : DEFAULT_MODEL,
+      categoryId: input.categoryId ? String(input.categoryId) : null,
+      semester: String(input.semester || "").trim().slice(0, 80) || null,
+      status: "draft",
+    };
+  }
 
-app.whenReady().then(() => {
-  session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
-    const source = selectedCaptureSource;
-    selectedCaptureSource = null;
-    callback(source ? { video: source, audio: "loopback" } : {});
+  async function registerMediaFile(event, courseId, sourceId) {
+    const source = getPendingImport(event, sourceId);
+    const moved = await moveIntoLibrary(source.filePath, courseId, source.name);
+    const media = courseDb.upsertMedia({
+      courseId, filePath: moved.filePath, originalName: source.name,
+      mimeType: source.mediaType === "video" ? `video/${source.extension}` : `audio/${source.extension}`,
+      mediaType: source.mediaType, extension: source.extension, size: moved.size, sha256: moved.sha256, processingStatus: "ready",
+    });
+    pendingImports.delete(String(sourceId));
+    return publicMedia(media);
+  }
+
+  function validateCourseId(value) {
+    const id = String(value || "").trim();
+    if (!id || id.length > 100) throw new Error("課程識別碼無效");
+    return id;
+  }
+
+  async function moveCourseToTrash(courseId) {
+    const id = validateCourseId(courseId);
+    const detail = courseDb.getCourseDetail(id);
+    if (!detail) throw new Error("找不到課程");
+    const trashRoot = path.join(libraryRoot, ".trash");
+    await fs.mkdir(trashRoot, { recursive: true });
+    for (const media of detail.media) {
+      if (media.is_trash || !media.file_path) continue;
+      const target = path.join(trashRoot, `${media.id}-${path.basename(media.file_path)}`);
+      await fs.rename(media.file_path, target);
+      courseDb.updateMedia(media.id, { filePath: target, isTrash: true, deletedAt: new Date().toISOString() });
+    }
+    return publicCourse(courseDb.trashCourse(id));
+  }
+
+  async function restoreCourseFromTrash(courseId) {
+    const id = validateCourseId(courseId);
+    const detail = courseDb.getCourseDetail(id);
+    if (!detail) throw new Error("找不到課程");
+    for (const media of detail.media) {
+      if (!media.is_trash || !media.file_path) continue;
+      const folder = path.join(libraryRoot, safeBaseName(id));
+      await fs.mkdir(folder, { recursive: true });
+      const filename = path.basename(media.file_path).replace(`${media.id}-`, "");
+      const target = path.join(folder, filename);
+      await fs.rename(media.file_path, target);
+      courseDb.updateMedia(media.id, { filePath: target, isTrash: false, deletedAt: null });
+    }
+    return publicCourse(courseDb.restoreCourse(id));
+  }
+
+  async function recoverInterruptedRecordings() {
+    const pending = courseDb.listProcessingMedia("recording");
+    for (const media of pending) {
+      const course = courseDb.getCourse(media.course_id);
+      if (!course) continue;
+      try {
+        const stats = await fs.stat(media.file_path);
+        if (stats.isFile() && stats.size > 0) {
+          const moved = await moveIntoLibrary(media.file_path, media.course_id, media.original_name);
+          courseDb.upsertMedia({
+            id: media.id, courseId: media.course_id, filePath: moved.filePath,
+            originalName: media.original_name, mimeType: media.mime_type || "video/webm",
+            mediaType: media.media_type, extension: media.extension || "webm", size: moved.size,
+            sha256: moved.sha256, processingStatus: "ready",
+          });
+          courseDb.updateCourse(media.course_id, { status: "failed", error: "上次錄影未正常結束；已保留影片，可按「重新轉錄」繼續處理。" });
+          startupLog(`已復原中斷錄影：${course.title}`);
+          continue;
+        }
+        courseDb.updateMedia(media.id, { processingStatus: "failed", size: 0 });
+        courseDb.updateCourse(media.course_id, { status: "failed", error: "上次錄影沒有留下可用的影片檔。" });
+      } catch (error) {
+        courseDb.updateMedia(media.id, { processingStatus: "interrupted" });
+        courseDb.updateCourse(media.course_id, { status: "failed", error: "上次錄影未正常結束，暫存影片仍保留；請檢查磁碟空間後重試。" });
+        startupLog(`中斷錄影待人工處理：${error.message}`);
+      }
+    }
+  }
+
+  async function purgeExpiredTrash() {
+    const cutoff = Date.now() - TRASH_RETENTION_MS;
+    const trashed = courseDb.listCourses({ trash: true });
+    for (const course of trashed) {
+      const deletedAt = Date.parse(course.deleted_at || "");
+      if (!Number.isFinite(deletedAt) || deletedAt > cutoff) continue;
+      const detail = courseDb.getCourseDetail(course.id);
+      let movedEveryMedia = true;
+      for (const media of detail?.media || []) {
+        if (!media.file_path) continue;
+        try { await shell.trashItem(media.file_path); }
+        catch (error) { movedEveryMedia = false; startupLog(`過期課程媒體移到 Windows 回收桶失敗：${error.message}`); }
+      }
+      if (movedEveryMedia) {
+        courseDb.deleteCourse(course.id);
+        startupLog(`已清理超過 30 天的課程回收桶資料：${course.title}`);
+      } else {
+        courseDb.updateCourse(course.id, { error: "回收桶保留期限已到，但部分媒體尚未能移到 Windows 回收桶；請稍後重試。" });
+      }
+    }
+  }
+
+  function registerIpc() {
+    ipcMain.handle("app:log", (_event, message) => { startupLog(String(message || "")); return true; });
+    ipcMain.handle("app:open-external", async (_event, url) => {
+      const target = String(url || "");
+      if (!/^https:\/\/ollama\.com\//i.test(target)) throw new Error("不允許開啟這個網址");
+      await shell.openExternal(target);
+      return true;
+    });
+    ipcMain.handle("app:info", () => ({ version: APP_VERSION, name: "CourseScribe", dataPath: app.getPath("userData") }));
+    ipcMain.handle("widget:show", () => {
+      recordingWidgetState = { ...recordingWidgetState, visible: true };
+      createRecordingWidget();
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize();
+      return true;
+    });
+    ipcMain.handle("widget:hide", () => {
+      recordingWidgetState = { ...recordingWidgetState, visible: false };
+      if (widgetWindow && !widgetWindow.isDestroyed()) widgetWindow.hide();
+      return true;
+    });
+    ipcMain.handle("widget:update", (_event, nextState = {}) => {
+      recordingWidgetState = {
+        visible: Boolean(nextState.visible ?? recordingWidgetState.visible),
+        recording: Boolean(nextState.recording),
+        paused: Boolean(nextState.paused),
+        elapsedMs: Math.max(0, Number(nextState.elapsedMs) || 0),
+        title: String(nextState.title || "").slice(0, 200),
+      };
+      sendWidgetState();
+      if (!recordingWidgetState.recording && widgetWindow && !widgetWindow.isDestroyed()) widgetWindow.hide();
+      return true;
+    });
+    ipcMain.handle("widget:get-state", () => ({ ...recordingWidgetState }));
+    ipcMain.handle("widget:action", (_event, action) => {
+      const safeAction = ["pause", "resume", "stop", "open", "close"].includes(action) ? action : "";
+      if (!safeAction) throw new Error("未知的小工具操作");
+      if (safeAction === "open") {
+        createWindow();
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
+        return true;
+      }
+      if (safeAction === "close") {
+        if (widgetWindow && !widgetWindow.isDestroyed()) widgetWindow.hide();
+        return true;
+      }
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("widget:action", safeAction);
+      return true;
+    });
+
+    ipcMain.handle("courses:list", (_event, filters) => courseDb.listCourses(filters || {}).map(publicCourse));
+    ipcMain.handle("courses:get", (_event, courseId) => publicDetail(courseDb.getCourseDetail(validateCourseId(courseId))));
+    ipcMain.handle("courses:create", (_event, input) => publicCourse(courseDb.createCourse(makeCourseInput(input))));
+    ipcMain.handle("courses:update", (_event, { courseId, patch }) => publicCourse(courseDb.updateCourse(validateCourseId(courseId), patch || {})));
+    ipcMain.handle("courses:trash", (_event, courseId) => moveCourseToTrash(courseId));
+    ipcMain.handle("courses:restore", (_event, courseId) => restoreCourseFromTrash(courseId));
+    ipcMain.handle("courses:delete-permanently", async (_event, courseId) => {
+      const id = validateCourseId(courseId);
+      const detail = courseDb.getCourseDetail(id);
+      if (!detail) return { deleted: false };
+      if (!detail.course.deleted_at) throw new Error("請先將課程移到應用內回收桶。");
+      for (const media of detail.media) {
+        try { if (media.file_path) await shell.trashItem(media.file_path); } catch (error) { startupLog(`媒體移到回收桶失敗: ${error.message}`); }
+      }
+      courseDb.deleteCourse(id);
+      emitUpdated(id, "deleted");
+      return { deleted: true };
+    });
+    ipcMain.handle("courses:import-media", async (event, { courseId, sourceId }) => {
+      const id = validateCourseId(courseId);
+      const media = await registerMediaFile(event, id, sourceId);
+      emitUpdated(id, "media");
+      return media;
+    });
+    ipcMain.handle("courses:export-media", async (_event, { mediaId }) => {
+      const media = courseDb.getMedia(String(mediaId || ""));
+      if (!media?.file_path) throw new Error("找不到媒體");
+      const result = await dialog.showSaveDialog(mainWindow, { defaultPath: media.original_name });
+      if (result.canceled || !result.filePath) return { canceled: true };
+      await fs.copyFile(media.file_path, result.filePath);
+      return { canceled: false };
+    });
+
+    ipcMain.handle("categories:list", () => courseDb.listCategories());
+    ipcMain.handle("categories:create", (_event, name) => courseDb.addCategory(String(name || "")));
+    ipcMain.handle("semesters:list", () => courseDb.listSemesters());
+    ipcMain.handle("semesters:create", (_event, name) => courseDb.addSemester(String(name || "")));
+
+    ipcMain.handle("media:choose", chooseMediaFile);
+    ipcMain.handle("transcription:start", (_event, { courseId, mediaId, language }) => {
+      const id = validateCourseId(courseId);
+      const job = courseDb.createJob(id, "transcription");
+      activeJobs.set(job.id, id);
+      void runImportedPipeline(id, String(mediaId || ""), String(language || "zh-TW"), job.id);
+      return { jobId: job.id };
+    });
+    ipcMain.handle("transcription:retry", (_event, { courseId }) => {
+      const id = validateCourseId(courseId);
+      const detail = courseDb.getCourseDetail(id);
+      const media = detail?.media.find((item) => item.processing_status !== "recording") || detail?.media[0];
+      if (!media) throw new Error("找不到可重新轉錄的媒體");
+      courseDb.clearSegments(id);
+      const job = courseDb.createJob(id, "transcription-retry");
+      activeJobs.set(job.id, id);
+      void runImportedPipeline(id, media.id, detail.course.language, job.id);
+      return { jobId: job.id };
+    });
+    ipcMain.handle("notes:generate", async (_event, { courseId, model }) => {
+      const id = validateCourseId(courseId);
+      try { return { note: await generateNotesForCourse(id, model || null) }; }
+      catch (error) {
+        courseDb.updateCourse(id, { status: "failed", error: error.message });
+        courseDb.saveNotes(id, { model: model || courseDb.getSetting("selectedOllamaModel", DEFAULT_MODEL), status: "error", error: error.message });
+        emitProgress(id, "error", error.message, 100, { code: error.code || "NOTES_FAILED" });
+        emitUpdated(id, "notes-error");
+        throw error;
+      }
+    });
+
+    ipcMain.handle("models:status", async () => ({ ...await ollama.status(), choices: AVAILABLE_MODELS, selected: courseDb.getSetting("selectedOllamaModel", DEFAULT_MODEL) }));
+    ipcMain.handle("models:select", (_event, model) => {
+      const selected = String(model || "");
+      if (!AVAILABLE_MODELS.some((item) => item.name === selected)) throw new Error("不支援的模型");
+      courseDb.setSetting("selectedOllamaModel", selected);
+      return { selected };
+    });
+    ipcMain.handle("models:pull", async (_event, model) => {
+      const selected = String(model || DEFAULT_MODEL);
+      if (!AVAILABLE_MODELS.some((item) => item.name === selected)) throw new Error("不支援的模型");
+      try {
+        const result = await ollama.pull(selected, (data) => emitModelProgress(selected, data));
+        return { result, status: await ollama.status() };
+      } catch (error) {
+        send("model:progress", { model: selected, status: "error", detail: error.message, progress: null });
+        throw error;
+      }
+    });
+    ipcMain.handle("models:remove", async (_event, model) => {
+      const selected = String(model || "");
+      if (!AVAILABLE_MODELS.some((item) => item.name === selected)) throw new Error("不支援的模型");
+      await ollama.remove(selected);
+      return ollama.status();
+    });
+    ipcMain.handle("models:cancel", () => { ollama.cancelAll(); return true; });
+    ipcMain.handle("models:open-download", () => shell.openExternal("https://ollama.com/download/windows"));
+
+    ipcMain.handle("capture:list", async () => {
+      const sources = await desktopCapturer.getSources({ types: ["screen", "window"], thumbnailSize: { width: 360, height: 203 } });
+      captureSources.clear();
+      const result = sources.map((source) => {
+        captureSources.set(source.id, source);
+        return { id: source.id, name: source.name, thumbnail: source.thumbnail.toDataURL(), type: source.id.startsWith("window:") ? "window" : "screen" };
+      });
+      startupLog(`找到 ${result.length} 個可錄製來源`);
+      return result;
+    });
+    ipcMain.handle("capture:select", (_event, sourceId) => {
+      selectedCaptureSource = captureSources.get(String(sourceId || "")) || null;
+      return Boolean(selectedCaptureSource);
+    });
+
+    ipcMain.handle("recording:create", (_event, input) => publicCourse(courseDb.createCourse({ ...makeCourseInput(input), source: "recording" })));
+    ipcMain.handle("recording:begin", async (_event, { courseId, title, language, model }) => {
+      const id = validateCourseId(courseId);
+      if (liveSessions.has(id)) throw new Error("這門課已在錄製中。");
+      const tempVideo = path.join(stagingRoot, `${id}-${randomUUID()}.webm.part`);
+      const originalName = `${safeBaseName(title)}-${recordingStamp()}.webm`;
+      await fs.mkdir(stagingRoot, { recursive: true });
+      await fs.writeFile(tempVideo, Buffer.alloc(0));
+      const media = courseDb.upsertMedia({
+        id: randomUUID(), courseId: id, filePath: tempVideo, originalName,
+        mimeType: "video/webm", mediaType: "video", extension: "webm", size: 0,
+        processingStatus: "recording",
+      });
+      const sessionState = {
+        courseId: id, title: String(title || "未命名課程"), language: String(language || "zh-TW"),
+        model: AVAILABLE_MODELS.some((item) => item.name === model) ? model : courseDb.getSetting("selectedOllamaModel", DEFAULT_MODEL),
+        tempVideo, originalName, videoQueue: Promise.resolve(), audioQueue: Promise.resolve(), mediaId: media.id,
+        processedMs: 0, expectedMs: 0, error: null,
+      };
+      liveSessions.set(id, sessionState);
+      courseDb.updateCourse(id, { status: "recording", error: null });
+      emitProgress(id, "recording", "正在錄影與背景轉錄", 0, { live: true });
+      return { started: true, courseId: id };
+    });
+    ipcMain.handle("recording:video-chunk", (_event, { courseId, bytes }) => {
+      const state = liveSessions.get(validateCourseId(courseId));
+      if (!state) throw new Error("找不到正在錄製的課程");
+      const buffer = toBuffer(bytes);
+      if (!buffer.length) return { accepted: false };
+      state.videoQueue = state.videoQueue.then(() => fs.appendFile(state.tempVideo, buffer));
+      state.videoQueue = state.videoQueue.catch((error) => { state.error = state.error || error; throw error; });
+      return { accepted: true, bytes: buffer.length };
+    });
+    ipcMain.handle("recording:audio-chunk", (_event, { courseId, samples, sampleRate, startMs, expectedMs }) => {
+      const state = liveSessions.get(validateCourseId(courseId));
+      if (!state) throw new Error("找不到正在錄製的課程");
+      const input = samples instanceof Float32Array ? new Float32Array(samples) : Float32Array.from(samples || []);
+      if (!input.length) return { accepted: false };
+      state.expectedMs = Math.max(state.expectedMs, Number(expectedMs) || 0);
+      state.audioQueue = state.audioQueue.catch(() => {}).then(() => processLiveAudio(state, input, Number(sampleRate) || 16000, Number(startMs) || 0)).catch((error) => {
+        state.error = state.error || error;
+        startupLog(`背景轉錄片段失敗: ${error.stack || error.message}`);
+      });
+      return { accepted: true };
+    });
+    ipcMain.handle("recording:finish", (_event, { courseId }) => {
+      const state = liveSessions.get(validateCourseId(courseId));
+      if (!state) throw new Error("找不到正在錄製的課程");
+      void finishLiveSession(state);
+      return { accepted: true };
+    });
+
+    // Compatibility aliases for the earlier 0.1.x renderer/tests.
+    ipcMain.handle("recording:choose-media", chooseMediaFile);
+    ipcMain.handle("recording:export-imported", async (event, { sourceId, courseTitle }) => {
+      const source = getPendingImport(event, sourceId);
+      const result = await dialog.showSaveDialog(mainWindow, { defaultPath: `${safeBaseName(courseTitle)}.${source.extension}` });
+      if (result.canceled || !result.filePath) return { canceled: true };
+      await fs.copyFile(source.filePath, result.filePath);
+      return { canceled: false };
+    });
+  }
+
+  app.on("second-instance", () => {
+    if (!mainWindow) createWindow();
+    else {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+      mainWindow.webContents.send("app:focus");
+    }
   });
-  createWindow();
-  app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
-}).catch((error) => startupLog(`應用程式啟動失敗: ${error.stack || error.message}`));
 
-app.on("window-all-closed", () => {
-  importedMedia.clear();
-  if (process.platform !== "darwin") app.quit();
-});
+  process.on("uncaughtException", (error) => startupLog(`未處理例外: ${error.stack || error.message}`));
+  process.on("unhandledRejection", (error) => startupLog(`未處理 Promise: ${error?.stack || error}`));
+
+  app.whenReady().then(async () => {
+    try {
+      const userData = app.getPath("userData");
+      libraryRoot = path.join(userData, "media-library");
+      stagingRoot = path.join(userData, "staging");
+      await fs.mkdir(libraryRoot, { recursive: true });
+      await fs.mkdir(stagingRoot, { recursive: true });
+      courseDb = new CourseDatabase(path.join(userData, "coursescribe.sqlite"));
+      ollama = new OllamaClient();
+      await recoverInterruptedRecordings();
+      await purgeExpiredTrash();
+      protocol.handle("coursescribe-media", async (request) => {
+        try {
+          const url = new URL(request.url);
+          const mediaId = decodeURIComponent(url.pathname.replace(/^\//, ""));
+          const media = courseDb.getMedia(mediaId);
+          if (!media || media.media_type !== "video" || media.is_trash || !media.file_path) return new Response("Not found", { status: 404 });
+          return await net.fetch(pathToFileURL(media.file_path).toString());
+        } catch (error) {
+          startupLog(`讀取影片失敗: ${error.message}`);
+          return new Response("Not found", { status: 404 });
+        }
+      });
+      registerIpc();
+      session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
+        const source = selectedCaptureSource;
+        selectedCaptureSource = null;
+        callback(source ? { video: source, audio: "loopback" } : {});
+      });
+      createWindow();
+      startupLog(`CourseScribe ${APP_VERSION} 已啟動，資料庫位於 ${path.join(userData, "coursescribe.sqlite")}`);
+    } catch (error) {
+      startupLog(`應用程式啟動失敗: ${error.stack || error.message}`);
+      dialog.showErrorBox("CourseScribe 無法啟動", error.message || "資料庫初始化失敗");
+      app.quit();
+    }
+    app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+  }).catch((error) => startupLog(`應用程式啟動失敗: ${error.stack || error.message}`));
+
+  app.on("before-quit", () => {
+    try { ollama?.cancelAll(); } catch {}
+    try { courseDb?.close(); } catch {}
+  });
+  app.on("window-all-closed", () => {
+    captureSources.clear();
+    if (process.platform !== "darwin") app.quit();
+  });
+}

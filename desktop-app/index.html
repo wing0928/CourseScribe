@@ -3,42 +3,70 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self' https://huggingface.co https://cdn-lfs.huggingface.co https://cas-bridge.xethub.hf.co;" />
-    <title>課間捕手</title>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob: coursescribe-media:; connect-src 'self';" />
+    <title>課間捕手 · CourseScribe</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <main class="shell">
-      <header>
-        <div class="brand"><span class="brand-mark">◌</span><span><b>課間捕手</b><small>WHISPER · 本機課後轉錄</small></span></div>
-        <span class="privacy">● 音訊只在這台電腦處理</span>
+      <header class="app-header">
+        <div class="brand"><span class="brand-mark">◌</span><span><b>課間捕手</b><small>COURSESCRIBE · LOCAL WHISPER</small></span></div>
+        <nav class="main-nav" aria-label="主選單">
+          <button class="nav-button active" data-view="home">首頁</button>
+          <button class="nav-button" data-view="database">資料庫 <span class="nav-count" data-db-count>0</span></button>
+        </nav>
+        <span class="privacy"><i></i> 音訊只在這台電腦處理</span>
       </header>
 
-      <section class="hero">
-        <p class="eyebrow">COURSE RECORDING</p>
-        <h1>先專心上課，<br />下課再整理。</h1>
-        <p>錄完完整課程後，再由本機 Whisper 建立逐字稿與複習筆記。</p>
-      </section>
-
-      <section class="capture-card" aria-labelledby="capture-title">
-        <div class="capture-head"><div><p class="eyebrow">1 · RECORD</p><h2 id="capture-title">錄製課程</h2></div><span class="state" data-state>尚未開始</span></div>
-        <div class="controls">
-          <label><span>課程名稱</span><input data-course-title value="未命名課程" /></label>
-          <label><span>語言</span><select data-language><option value="zh-TW">繁體中文</option><option value="zh-CN">簡體中文</option><option value="en-US">English</option><option value="ja-JP">日本語</option></select></label>
-          <div class="record-actions"><button class="record" data-record><span data-record-icon>●</span><span data-record-label>開始錄製</span></button><button class="upload" data-upload type="button">上傳錄音／影音</button></div>
+      <section class="view" data-view-panel="home">
+        <div class="hero compact-hero">
+          <div><p class="eyebrow">COURSE CAPTURE</p><h1>先專心上課，<br />下課再整理。</h1><p>錄製或匯入課程，逐字稿與重點會在課後留在本機資料庫。</p></div>
+          <div class="hero-badge"><span>0.1.9</span><b>本機工作流程</b><small>Whisper · Ollama · Qwen</small></div>
         </div>
-        <p class="help">開始後直接錄製主要桌面與 Windows 系統聲音，不會再跳出無法操作的選擇視窗；請先把課程放在主要螢幕。課後轉錄時，每完成一段就會立即顯示逐字稿。</p>
-        <div class="source-info" data-source-info hidden><span class="source-badge">目前來源</span><strong data-source-name></strong><span data-source-meta></span></div>
+
+        <section class="capture-card" aria-labelledby="capture-title">
+          <div class="capture-head"><div><p class="eyebrow">1 · CAPTURE</p><h2 id="capture-title">開始一堂課</h2></div><span class="state" data-state>尚未開始</span></div>
+          <div class="form-grid">
+            <label class="wide"><span>課程名稱</span><input data-course-title value="未命名課程" maxlength="200" /></label>
+            <label><span>課程分類</span><div class="select-with-action"><select data-category><option value="">未分類</option></select><button type="button" class="tiny-button" data-add-category aria-label="新增課程分類">＋</button></div></label>
+            <label><span>學期</span><div class="select-with-action"><select data-semester><option value="">未指定</option></select><button type="button" class="tiny-button" data-add-semester aria-label="新增學期">＋</button></div></label>
+            <label><span>逐字稿語言</span><select data-language><option value="zh-TW">繁體中文（臺灣）</option><option value="zh-CN">簡體中文</option><option value="en-US">English</option><option value="ja-JP">日本語</option></select></label>
+            <label><span>筆記模型</span><select data-model></select></label>
+          </div>
+          <div class="inline-add" data-add-category-form hidden><input data-new-category placeholder="例如：微積分甲" maxlength="80" /><button type="button" data-save-category>新增分類</button><button type="button" class="quiet" data-cancel-category>取消</button></div>
+          <div class="inline-add" data-add-semester-form hidden><input data-new-semester placeholder="例如：114-1" maxlength="40" /><button type="button" data-save-semester>新增學期</button><button type="button" class="quiet" data-cancel-semester>取消</button></div>
+
+          <div class="source-picker">
+            <div class="source-heading"><div><b>錄製來源</b><small>選擇要錄的螢幕或課程視窗，開始後會同時錄影與背景轉錄。</small></div><button class="quiet-button" type="button" data-refresh-sources>重新整理</button></div>
+            <div class="source-list" data-source-list><div class="source-loading">正在讀取螢幕與視窗…</div></div>
+          </div>
+          <div class="capture-actions"><button class="record-button" data-record><span data-record-icon>●</span><span data-record-label>開始錄製</span></button><button class="pause-button" data-pause-recording type="button" hidden>暫停錄影</button><button class="upload-button" data-upload type="button">匯入錄音／影片</button><span class="record-tip">錄影會保存到本機；課後才顯示完整逐字稿。</span></div>
+          <div class="source-info" data-source-info hidden><span class="source-badge">目前來源</span><strong data-source-name></strong><span data-source-meta></span></div>
+        </section>
+
+        <section class="progress-card" data-progress-card hidden><div class="progress-top"><span data-progress-stage>準備中</span><b data-progress-copy>正在處理課程</b><strong data-progress-percent>0%</strong></div><div class="progress-track"><i data-progress-bar></i></div></section>
+
+        <div class="home-columns">
+          <section class="panel notes-panel"><div class="panel-head"><div><p class="eyebrow">2 · REVIEW</p><h2>課程大綱與筆記</h2></div><span data-notes-model>尚未整理</span></div><div class="notes-content empty" data-home-notes><span>✦</span><b>完成課後轉錄後整理</b><p>本機 Qwen 會將課程整理成摘要、重點、名詞與複習問題。</p></div><div class="panel-actions"><button type="button" data-home-open disabled>查看資料庫課程</button><button type="button" data-home-copy disabled>複製筆記</button></div></section>
+          <section class="panel model-panel"><div class="panel-head"><div><p class="eyebrow">LOCAL AI</p><h2>模型設定</h2></div><span data-ollama-badge>檢查中</span></div><div class="model-status" data-model-status><p>正在檢查本機 Ollama…</p></div><div class="panel-actions"><button type="button" data-refresh-models>重新檢查</button><button type="button" data-cancel-model hidden>取消下載</button><button type="button" data-open-ollama>安裝 Ollama</button></div></section>
+        </div>
+        <p class="status" role="status" data-status>準備好後選擇來源並開始錄製。</p>
       </section>
 
-      <section class="progress-card" data-progress-card hidden><div class="progress-top"><span data-progress-stage>準備中</span><b data-progress-copy>正在處理課程錄影</b><strong data-progress-percent>0%</strong></div><div class="progress-track"><i data-progress-bar></i></div></section>
-
-      <div class="grid">
-        <section class="panel"><div class="panel-head"><div><p class="eyebrow">2 · TRANSCRIBE</p><h2>課後逐字稿</h2></div><span data-word-count>0 字</span></div><div class="empty" data-transcript><span>◎</span><b>錄製或上傳檔案後開始轉錄</b><p>Whisper 會在這台電腦處理完整音訊；第一次需下載模型。</p></div><div class="panel-actions"><button data-transcribe disabled>使用 Whisper 轉錄</button><button data-export disabled>匯出來源檔</button></div></section>
-        <section class="panel notes"><div class="panel-head"><div><p class="eyebrow">3 · REVIEW</p><h2>課程筆記</h2></div></div><div class="empty" data-notes><span>✦</span><b>逐字稿完成後整理重點</b><p>將完整內容整理成重點、關鍵詞與一句話摘要。</p></div><div class="panel-actions"><button data-notes-button disabled>整理課程重點</button><button data-copy disabled>複製筆記</button></div></section>
-      </div>
-      <p class="status" role="status" data-status>準備好後開始錄製。</p>
+      <section class="view" data-view-panel="database" hidden>
+        <div class="page-heading"><div><p class="eyebrow">COURSE LIBRARY</p><h1>課程資料庫</h1><p>所有逐字稿與課程筆記都集中在這裡，首頁保持簡潔。</p></div><button class="secondary-button" type="button" data-back-home>＋ 新增課程</button></div>
+        <div class="database-toolbar"><label class="search-box"><span>⌕</span><input data-db-search placeholder="搜尋課程名稱、分類或學期" /></label><select data-db-category><option value="all">所有分類</option></select><select data-db-semester><option value="all">所有學期</option></select><select data-db-type><option value="all">所有媒體</option><option value="video">影片</option><option value="audio">錄音</option></select><select data-db-status><option value="all">所有狀態</option><option value="ready">已完成</option><option value="failed">需處理</option><option value="transcribing">轉錄中</option></select><button class="quiet-button" type="button" data-toggle-trash>回收桶</button></div>
+        <div class="database-layout"><div class="course-list" data-course-list><div class="list-loading">正在載入課程…</div></div><section class="course-detail" data-course-detail hidden></section></div>
+        <p class="status" role="status" data-db-status>選取一門課程查看逐字稿。</p>
+      </section>
     </main>
+    <aside class="recording-widget" data-recording-widget hidden aria-live="polite">
+      <span class="widget-dot" data-widget-dot></span>
+      <div class="widget-copy"><small data-widget-state>錄影中</small><strong data-widget-time>00:00:00</strong></div>
+      <button type="button" data-widget-pause>暫停</button>
+      <button type="button" class="widget-stop" data-widget-stop>停止</button>
+      <button type="button" class="widget-minimize" data-widget-minimize title="縮小成置頂小工具">↗</button>
+    </aside>
     <script src="renderer.js"></script>
   </body>
 </html>

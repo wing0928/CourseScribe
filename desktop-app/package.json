@@ -1,21 +1,24 @@
 {
-  "name": "course-capture-desktop",
-  "version": "0.1.8",
+  "name": "coursescribe-desktop",
+  "version": "0.1.9",
   "private": true,
   "description": "本機 Whisper 課程錄製與課後筆記桌面應用程式",
   "main": "main.cjs",
   "scripts": {
     "start": "electron .",
-    "check": "node --check main.cjs && node --check preload.cjs && node --check renderer.js && node --check media-utils.cjs && node --check scripts/smoke-electron.cjs && node --check scripts/verify-media-import.cjs",
+    "check": "node --check main.cjs && node --check preload.cjs && node --check renderer.js && node --check widget.js && node --check media-utils.cjs && node --check database.cjs && node --check text-utils.cjs && node --check ollama.cjs && node --check scripts/smoke-electron.cjs && node --check scripts/verify-media-import.cjs && node --check scripts/verify-core.cjs && node --check scripts/verify-ollama.cjs",
     "verify:ui": "electron --no-sandbox --disable-gpu --disable-gpu-compositing --disable-features=VizDisplayCompositor --in-process-gpu scripts/smoke-electron.cjs",
     "verify:media": "node scripts/verify-media-import.cjs",
     "verify:captions": "node scripts/compare-caption.mjs",
     "verify:whisper": "node scripts/verify-whisper.mjs",
+    "verify:core": "node scripts/verify-core.cjs",
+    "verify:ollama": "node scripts/verify-ollama.cjs",
     "package:windows": "electron-builder --win portable"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
     "ffmpeg-static": "^5.3.0",
+    "opencc-js": "^1.4.2",
     "wavefile": "^11.0.0"
   },
   "allowScripts": {
@@ -23,8 +26,8 @@
     "onnxruntime-node@1.24.3": true
   },
   "build": {
-    "appId": "com.coursecapture.desktop",
-    "productName": "課間捕手",
+    "appId": "com.coursescribe.desktop",
+    "productName": "CourseScribe",
     "asar": true,
     "files": [
       "**/*",
@@ -33,7 +36,8 @@
       "!node_modules/onnxruntime-node/bin/napi-v6/darwin/**",
       "!node_modules/onnxruntime-node/bin/napi-v6/linux/**",
       "!node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**",
-      "!verification-output/**"
+      "!verification-output/**",
+      "!.npm-cache/**"
     ],
     "directories": {
       "output": "release"
@@ -46,7 +50,7 @@
       "target": [
         "portable"
       ],
-      "artifactName": "CourseCapture-${version}-portable.${ext}"
+      "artifactName": "CourseScribe-${version}-portable.${ext}"
     }
   },
   "devDependencies": {

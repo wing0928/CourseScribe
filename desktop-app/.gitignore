@@ -1,6 +1,7 @@
 node_modules/
 dist/
 release/
+release-*/
 release-0.1.6/
 release-final/
 release-clean/
@@ -10,4 +11,5 @@ verified-release-2/
 verified-release-3/
 verified-release-4/
 verification-output/
+.npm-cache/
 *.log

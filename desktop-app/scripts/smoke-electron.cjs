@@ -2,188 +2,131 @@ const { app } = require("electron");
 const os = require("node:os");
 const path = require("node:path");
 const fs = require("node:fs");
+const { dialog } = require("electron");
+const { CourseDatabase } = require("../database.cjs");
 
-const smokeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "course-capture-electron-smoke-"));
-const videosRoot = path.join(smokeRoot, "videos");
-const importedFixture = path.join(smokeRoot, "lecture-audio.mp3");
-fs.mkdirSync(videosRoot, { recursive: true });
-fs.writeFileSync(importedFixture, Buffer.alloc(32, 7));
+const smokeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "coursescribe-electron-smoke-"));
+const fixture = path.join(smokeRoot, "lecture-audio.mp3");
+fs.writeFileSync(fixture, Buffer.alloc(96, 7));
+const recoveryStaging = path.join(smokeRoot, "staging");
+fs.mkdirSync(recoveryStaging, { recursive: true });
+const recoveryPath = path.join(recoveryStaging, "recovery.webm.part");
+fs.writeFileSync(recoveryPath, Buffer.alloc(128, 9));
+const recoveryDb = new CourseDatabase(path.join(smokeRoot, "coursescribe.sqlite"));
+const recoveryCourse = recoveryDb.createCourse({ title: "中斷復原測試", source: "recording", language: "zh-TW" });
+recoveryDb.upsertMedia({ id: "recovery-media", courseId: recoveryCourse.id, filePath: recoveryPath, originalName: "recovery.webm", mimeType: "video/webm", mediaType: "video", extension: "webm", size: 128, processingStatus: "recording" });
+recoveryDb.close();
 app.setPath("userData", smokeRoot);
-app.setPath("videos", videosRoot);
 app.commandLine.appendSwitch("disable-gpu");
 app.commandLine.appendSwitch("disable-gpu-compositing");
 app.commandLine.appendSwitch("disable-features", "VizDisplayCompositor");
 app.disableHardwareAcceleration();
-const { BrowserWindow, dialog } = require("electron");
 
-let openDialogMode = "cancel";
-let exportCount = 0;
-const exportedFiles = [];
+let openMode = "cancel";
 dialog.showOpenDialog = async (_window, options) => {
-  if (options?.title !== "選擇錄音或影音檔") throw new Error(`非預期的開檔視窗：${options?.title || ""}`);
-  return openDialogMode === "cancel" ? { canceled: true, filePaths: [] } : { canceled: false, filePaths: [importedFixture] };
-};
-dialog.showSaveDialog = async (_window, options) => {
-  const extension = path.extname(options?.defaultPath || "") || ".webm";
-  const filePath = path.join(smokeRoot, `export-${++exportCount}${extension}`);
-  exportedFiles.push(filePath);
-  return { canceled: false, filePath };
+  if (options?.title !== "選擇錄音或影音檔") throw new Error(`非預期的檔案對話框：${options?.title || ""}`);
+  return openMode === "cancel" ? { canceled: true, filePaths: [] } : { canceled: false, filePaths: [fixture] };
 };
 
-const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const fail = (message) => { throw new Error(message); };
-function exitAfterTest(code) {
-  app.exit(code);
-  setTimeout(() => process.exit(code), 250).unref();
-}
+function exitAfterTest(code) { app.exit(code); setTimeout(() => process.exit(code), 300).unref(); }
 
 async function waitForWindow() {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    const window = BrowserWindow.getAllWindows()[0];
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    const window = require("electron").BrowserWindow.getAllWindows()[0];
     if (window && !window.isDestroyed() && !window.webContents.isLoadingMainFrame()) return window;
     await wait(100);
   }
-  return fail("主視窗未在 5 秒內完成載入");
+  fail("主視窗未在 6 秒內完成載入");
 }
 
-async function evaluate(window, expression) {
-  return window.webContents.executeJavaScript(`(${expression})()`);
-}
-
-async function waitFor(window, expression, message) {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    if (await evaluate(window, expression)) return;
-    await wait(100);
-  }
-  fail(message);
+async function evaluate(window, expression, ...args) {
+  return window.webContents.executeJavaScript(`(${expression})(${args.map((value) => JSON.stringify(value)).join(",")})`);
 }
 
 async function run() {
   require("../main.cjs");
   await app.whenReady();
   const window = await waitForWindow();
+  const recovered = await evaluate(window, async (courseId) => window.courseCapture.courses.get(courseId), recoveryCourse.id);
+  if (!recovered || recovered.course.status !== "failed" || recovered.media[0]?.processingStatus !== "ready") fail(`中斷錄影沒有在啟動時復原：${JSON.stringify(recovered)}`);
   const initial = await evaluate(window, () => ({
     title: document.title,
-    hasOldPicker: Boolean(document.querySelector("[data-picker]")),
-    recordReady: Boolean(document.querySelector("[data-record]") && !document.querySelector("[data-record]").disabled),
+    oldPicker: Boolean(document.querySelector("[data-picker], .picker")),
+    hasHome: Boolean(document.querySelector("[data-view-panel=home]")),
+    hasDatabase: Boolean(document.querySelector("[data-view-panel=database]")),
+    recordReady: Boolean(document.querySelector("[data-record]")),
     uploadReady: Boolean(document.querySelector("[data-upload]")),
-    transcriptDisabled: document.querySelector("[data-transcribe]")?.disabled === true,
+    homeHasTranscript: Boolean(document.querySelector("[data-transcript]")),
+    hasRecordingWidget: Boolean(document.querySelector("[data-recording-widget]")),
+    hasPauseControl: Boolean(document.querySelector("[data-pause-recording]")),
+    hasModelCancel: Boolean(document.querySelector("[data-cancel-model]")),
+    hasWidgetBridge: Boolean(window.courseCapture.widget?.show && window.courseCapture.widget?.onAction),
   }));
-  if (initial.title !== "課間捕手") fail(`主畫面標題錯誤：${initial.title}`);
-  if (initial.hasOldPicker) fail("舊的中央選擇視窗仍存在");
-  if (!initial.recordReady) fail("開始錄製按鈕不可用");
-  if (!initial.uploadReady) fail("上傳錄音／影音按鈕不存在");
-  if (!initial.transcriptDisabled) fail("尚未錄影時，逐字稿按鈕應停用");
+  if (!initial.hasHome || !initial.hasDatabase || initial.oldPicker || !initial.recordReady || !initial.uploadReady || initial.homeHasTranscript || !initial.hasRecordingWidget || !initial.hasPauseControl || !initial.hasModelCancel || !initial.hasWidgetBridge) fail(`首頁結構錯誤：${JSON.stringify(initial)}`);
 
-  await evaluate(window, () => document.querySelector("[data-upload]").click());
-  await waitFor(window, () => document.querySelector("[data-status]")?.textContent.includes("取消"), "取消上傳沒有安全返回");
-  const uploadCanceled = await evaluate(window, () => ({
-    sourceHidden: document.querySelector("[data-source-info]")?.hidden === true,
-    transcribeDisabled: document.querySelector("[data-transcribe]")?.disabled === true,
-    status: document.querySelector("[data-status]")?.textContent || "",
-  }));
-  if (!uploadCanceled.sourceHidden || !uploadCanceled.transcribeDisabled) fail("取消上傳改變了目前課程來源");
+  await evaluate(window, () => document.querySelector("[data-view=database]").click());
+  await wait(250);
+  const initialDatabase = await evaluate(window, () => ({ hidden: document.querySelector("[data-view-panel=database]").hidden, hasSearch: Boolean(document.querySelector("[data-db-search]")) }));
+  if (initialDatabase.hidden || !initialDatabase.hasSearch) fail("資料庫分頁未正常開啟");
 
-  openDialogMode = "file";
-  await evaluate(window, () => document.querySelector("[data-upload]").click());
-  await waitFor(window, () => document.querySelector("[data-transcribe]")?.disabled === false, "上傳檔案後逐字稿按鈕未啟用");
-  const uploaded = await evaluate(window, () => ({
-    sourceVisible: document.querySelector("[data-source-info]")?.hidden === false,
-    sourceText: document.querySelector("[data-source-info]")?.textContent || "",
-    transcribeReady: document.querySelector("[data-transcribe]")?.disabled === false,
-    exportReady: document.querySelector("[data-export]")?.disabled === false,
-  }));
-  if (!uploaded.sourceVisible || !uploaded.sourceText.includes("lecture-audio.mp3") || uploaded.sourceText.includes("course-capture-electron-smoke") || !uploaded.transcribeReady || !uploaded.exportReady) {
-    fail("上傳音訊後來源資訊、路徑隱私或按鈕狀態錯誤");
-  }
-
-  await evaluate(window, () => document.querySelector("[data-export]").click());
-  for (let attempt = 0; attempt < 50 && (!exportedFiles[0] || !fs.existsSync(exportedFiles[0])); attempt += 1) await wait(100);
-  if (!fs.existsSync(exportedFiles[0]) || fs.statSync(exportedFiles[0]).size !== 32) fail("上傳來源無法以主程序安全匯出");
-
-  await evaluate(window, () => {
-    window.__COURSE_CAPTURE_TEST_TRANSCRIBE__ = async (payload) => {
-      window.__COURSE_CAPTURE_TEST_UPLOAD_PAYLOAD__ = { sourceId: payload.sourceId || "", hasBytes: Boolean(payload.bytes), extension: payload.extension || "" };
-      window.__COURSE_CAPTURE_TEST_PUSH_TRANSCRIPT__?.([{ time: 0, text: "即時顯示的第一句。" }]);
-      window.__COURSE_CAPTURE_TEST_SET_PROGRESS__?.({ stage: "transcribe", detail: "測試轉錄進度", progress: 42 });
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      return { text: "上傳音訊測試。", segments: [{ time: 0, text: "上傳音訊測試。" }] };
-    };
-    document.querySelector("[data-transcribe]").click();
+  const created = await evaluate(window, async () => {
+    const category = await window.courseCapture.categories.create("測試分類");
+    const semester = await window.courseCapture.semesters.create("2026-1");
+    return window.courseCapture.courses.create({ title: "持久化測試課程", categoryId: category.id, semester: semester.name, language: "zh-TW", model: "qwen3:4b" });
   });
-  await waitFor(window, () => document.querySelector("[data-transcript]")?.textContent.includes("即時顯示的第一句"), "轉錄中的逐字稿沒有立即顯示");
-  const uploadLive = await evaluate(window, () => ({
-    partialVisible: document.querySelector("[data-transcript]")?.textContent.includes("即時顯示的第一句"),
-    progressPercent: document.querySelector("[data-progress-percent]")?.textContent || "",
-    progressWidth: document.querySelector("[data-progress-bar]")?.style.width || "",
-  }));
-  if (!uploadLive.partialVisible || uploadLive.progressPercent !== "42%" || uploadLive.progressWidth !== "42%") fail(`轉錄即時顯示或百分比錯誤：${JSON.stringify(uploadLive)}`);
-  await waitFor(window, () => document.querySelector("[data-notes-button]")?.disabled === false, "上傳音訊轉錄未完成");
-  const uploadTranscript = await evaluate(window, () => ({
-    payload: window.__COURSE_CAPTURE_TEST_UPLOAD_PAYLOAD__,
-    transcriptVisible: document.querySelector("[data-transcript]")?.textContent.includes("上傳音訊測試"),
-  }));
-  if (!uploadTranscript.payload?.sourceId || uploadTranscript.payload.hasBytes || uploadTranscript.payload.extension || !uploadTranscript.transcriptVisible) {
-    fail("上傳音訊沒有以不含檔案內容的安全來源代號送入轉錄流程");
-  }
+  const loaded = await evaluate(window, async (courseId) => window.courseCapture.courses.get(courseId), created.id);
+  if (!loaded || loaded.course.title !== "持久化測試課程" || loaded.course.categoryName !== "測試分類" || loaded.course.semester !== "2026-1") fail("課程、分類或學期沒有保存");
 
-  await evaluate(window, () => {
-    const canvas = document.createElement("canvas");
-    canvas.width = 320;
-    canvas.height = 180;
-    canvas.getContext("2d").fillRect(0, 0, canvas.width, canvas.height);
-    const stream = canvas.captureStream(10);
-    window.__COURSE_CAPTURE_TEST_MODE__ = true;
-    window.__COURSE_CAPTURE_TEST_GET_DISPLAY_MEDIA__ = async () => stream;
-    document.querySelector("[data-course-title]").value = "__course-capture-smoke__";
-    document.querySelector("[data-record]").click();
+  openMode = "file";
+  const imported = await evaluate(window, async () => {
+    const choice = await window.courseCapture.media.choose();
+    const course = await window.courseCapture.courses.create({ title: "匯入測試課程", language: "zh-TW" });
+    const media = await window.courseCapture.courses.importMedia(course.id, choice.sourceId);
+    return { course, media };
   });
-  await waitFor(window, () => document.querySelector("[data-state]")?.textContent === "錄製中", "模擬錄製未啟動");
+  if (!imported.media || imported.media.mediaType !== "audio" || !imported.media.size || fs.existsSync(fixture)) fail("媒體沒有安全移入受管理媒體庫");
+  const importedDetail = await evaluate(window, async (courseId) => window.courseCapture.courses.get(courseId), imported.course.id);
+  if (importedDetail.media.length !== 1 || importedDetail.media[0].mediaType !== "audio") fail("匯入媒體沒有寫入資料庫");
 
-  await evaluate(window, () => document.querySelector("[data-record]").click());
-  await waitFor(window, () => document.querySelector("[data-transcribe]")?.disabled === false, "錄影未完成儲存");
-  const recordingSaved = await evaluate(window, () => ({
-    transcribeReady: document.querySelector("[data-transcribe]")?.disabled === false,
-    exportReady: document.querySelector("[data-export]")?.disabled === false,
-    sourceText: document.querySelector("[data-source-info]")?.textContent || "",
-    status: document.querySelector("[data-status]")?.textContent || "",
+  await evaluate(window, async (courseId) => window.courseCapture.courses.trash(courseId), imported.course.id);
+  const trashed = await evaluate(window, async (courseId) => window.courseCapture.courses.get(courseId), imported.course.id);
+  if (!trashed.course.deleted_at || !trashed.media[0].is_trash) fail("課程回收桶沒有標記並移入受管理媒體");
+  await evaluate(window, async (courseId) => window.courseCapture.courses.restore(courseId), imported.course.id);
+  const restored = await evaluate(window, async (courseId) => window.courseCapture.courses.get(courseId), imported.course.id);
+  if (restored.course.deleted_at || restored.media[0].is_trash) fail("課程回收桶還原失敗");
+
+  const databaseAfterImport = await evaluate(window, () => ({
+    text: document.querySelector("[data-course-list]")?.textContent || "",
   }));
-  if (!recordingSaved.transcribeReady || !recordingSaved.exportReady || !recordingSaved.sourceText.includes("本機錄製")) fail(`錄影未完成儲存：${recordingSaved.status}`);
+  if (!databaseAfterImport.text.includes("持久化測試課程")) fail("資料庫列表沒有顯示課程");
 
-  await evaluate(window, () => document.querySelector("[data-export]").click());
-  for (let attempt = 0; attempt < 50 && (!exportedFiles[1] || !fs.existsSync(exportedFiles[1])); attempt += 1) await wait(100);
-  if (!fs.existsSync(exportedFiles[1]) || fs.statSync(exportedFiles[1]).size <= 0) fail("既有錄影無法匯出");
-
-  await evaluate(window, () => {
-    window.__COURSE_CAPTURE_TEST_TRANSCRIBE__ = async (payload) => {
-      window.__COURSE_CAPTURE_TEST_RECORDING_PAYLOAD__ = { sourceId: payload.sourceId || "", hasBytes: Boolean(payload.bytes), extension: payload.extension || "" };
-      return { text: "第一個概念說明。第二個概念補充。", segments: [{ time: 0, text: "第一個概念說明。" }, { time: 8, text: "第二個概念補充。" }] };
-    };
-    document.querySelector("[data-transcribe]").click();
+  await evaluate(window, async () => {
+    await window.courseCapture.widget.update({ visible: true, recording: true, paused: false, elapsedMs: 3723000, title: "小工具測試課程" });
+    await window.courseCapture.widget.show();
   });
-  await waitFor(window, () => document.querySelector("[data-notes-button]")?.disabled === false, "錄影逐字稿未完成");
-  const transcriptReady = await evaluate(window, () => ({
-    payload: window.__COURSE_CAPTURE_TEST_RECORDING_PAYLOAD__,
-    notesEnabled: document.querySelector("[data-notes-button]")?.disabled === false,
-    hasTranscript: document.querySelector("[data-transcript]")?.textContent.includes("第一個概念說明"),
-  }));
-  if (transcriptReady.payload?.sourceId || !transcriptReady.payload?.hasBytes || transcriptReady.payload?.extension !== "webm" || !transcriptReady.notesEnabled || !transcriptReady.hasTranscript) {
-    fail("既有錄影沒有維持 WebM 位元資料轉錄流程");
+  let widgetWindow;
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    widgetWindow = require("electron").BrowserWindow.getAllWindows().find((candidate) => candidate !== window && !candidate.isDestroyed());
+    if (widgetWindow && !widgetWindow.webContents.isLoadingMainFrame()) break;
+    await wait(100);
   }
-
-  await evaluate(window, () => document.querySelector("[data-notes-button]").click());
-  const notesReady = await evaluate(window, () => ({
-    hasHeading: document.querySelector("[data-notes]")?.textContent.includes("本堂重點"),
-    hasBullet: document.querySelector("[data-notes]")?.textContent.includes("第二個概念補充"),
-    copyEnabled: document.querySelector("[data-copy]")?.disabled === false,
+  if (!widgetWindow) fail("置頂錄影小工具沒有開啟");
+  const widget = await evaluate(widgetWindow, () => ({
+    time: document.querySelector("[data-time]")?.textContent,
+    title: document.querySelector("[data-title]")?.textContent,
+    pauseReady: Boolean(document.querySelector("[data-pause]")),
+    stopReady: Boolean(document.querySelector("[data-stop]")),
   }));
-  if (!notesReady.hasHeading || !notesReady.hasBullet || !notesReady.copyEnabled) fail("課程筆記未完成整理");
+  if (widget.time !== "01:02:03" || widget.title !== "小工具測試課程" || !widget.pauseReady || !widget.stopReady) fail(`錄影小工具狀態錯誤：${JSON.stringify(widget)}`);
+  await evaluate(widgetWindow, () => window.courseCapture.widget.action("close"));
 
-  console.log(JSON.stringify({ initial, uploadCanceled, uploaded, uploadLive, uploadTranscript, recordingSaved, transcriptReady, notesReady, exportedFiles }));
+  console.log(JSON.stringify({ initial, initialDatabase, persisted: loaded.course.title, imported: imported.media.originalName, sourceMoved: !fs.existsSync(fixture), trashRestore: true, recovery: recovered.course.title, widget }));
   exitAfterTest(0);
 }
 
-run().catch(async (error) => {
+run().catch((error) => {
   console.error(error.stack || error.message);
   if (app.isReady()) exitAfterTest(1);
   else process.exitCode = 1;
