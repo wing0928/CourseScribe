@@ -22,6 +22,12 @@ try {
   assert.equal(db.listProcessingMedia("recording").length, 1, "錄影中的媒體應可被啟動復原流程找到");
   reopened = new CourseDatabase(path.join(root, "courses.sqlite"));
   assert.equal(reopened.getCourseDetail(course.id).course.title, "本機持久化測試");
+  const anotherCategory = reopened.addCategory("物理");
+  assert.equal(reopened.setCourseCategory(course.id, anotherCategory.id).category_id, anotherCategory.id);
+  assert.equal(reopened.getCourseDetail(course.id).course.category_name, "物理");
+  assert.equal(reopened.listCourses({ categoryId: anotherCategory.id }).length, 1);
+  assert.throws(() => reopened.setCourseCategory(course.id, "missing-category"), /分類不存在/);
+  assert.equal(reopened.setCourseCategory(course.id, null).category_id, null);
   assert.equal(toTraditionalTaiwan("简体课程、软件和视频", "zh-TW"), "簡體課程、軟體和影片");
   assert.equal(toTraditionalTaiwan("简体课程", "zh-CN"), "简体课程", "簡體中文模式不應被轉換");
   reopened.trashCourse(course.id);
@@ -30,12 +36,22 @@ try {
   reopened.restoreCourse(course.id);
   assert.equal(reopened.listCourses({}).some((item) => item.id === course.id), true);
   assert.equal(parseJsonResponse('{"summary":"x","keyPoints":["y"]}').summary, "x");
-  assert.deepEqual(normalizeNoteShape({ summary: "x", keyPoints: ["y"] }), { summary: "x", keyPoints: ["y"], termsAndFormulas: [], confusions: [], reviewQuestions: [], takeaway: "" });
+  assert.deepEqual(normalizeNoteShape({ summary: "x", keyPoints: ["y"] }), { summary: "x", sections: [{ title: "舊版重點（建議重新整理）", timestamp: "", points: [{ text: "y", quote: "", timestamp: "", status: "needs_review" }] }], confusions: [], reviewQuestions: [], takeaway: "" });
+  const prior = reopened.saveNotes(course.id, { status: "ready", json: { summary: "舊筆記" }, text: "舊筆記" });
+  assert.equal(prior.json.summary, "舊筆記");
+  reopened.saveNotes(course.id, { status: "processing" });
+  assert.equal(reopened.getNotes(course.id).json.summary, "舊筆記", "重新整理時應保留前次筆記");
+  reopened.saveNotes(course.id, { status: "error", error: "模型中斷" });
+  assert.equal(reopened.getNotes(course.id).json.summary, "舊筆記", "整理失敗時不得刪掉前次筆記");
+  reopened.saveNoteMap(course.id, "qwen3:4b", "guide-hash", 0, "chunk-hash", { sections: [{ title: "主題", timestamp: "00:00", points: ["重點"] }], uncertainties: [] });
+  assert.equal(reopened.getNoteMap(course.id, "qwen3:4b", "guide-hash", 0, "chunk-hash").sections[0].title, "主題");
+  assert.equal(reopened.getNoteMap(course.id, "qwen3:4b", "different-guide", 0, "chunk-hash"), null, "不同規範不可使用舊快取");
   const main = fs.readFileSync(path.join(__dirname, "..", "main.cjs"), "utf8");
   assert.match(main, /requestSingleInstanceLock/);
   assert.match(main, /coursescribe-media/);
   assert.match(main, /TRASH_RETENTION_MS/);
   assert.match(main, /purgeExpiredTrash/);
+  assert.match(fs.readFileSync(path.join(__dirname, "..", "ollama.cjs"), "utf8"), /segment\.startMs/);
   console.log(JSON.stringify({ ok: true, persistence: true, opencc: true, ollamaJson: true, singleInstance: true }));
 } finally {
   try { db.close(); } catch {}

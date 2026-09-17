@@ -33,10 +33,18 @@ const {
   DEFAULT_MODEL,
   HIGH_QUALITY_MODEL,
   AVAILABLE_MODELS,
-  buildNotePrompt,
+  MAP_SCHEMA,
+  SYNTHESIS_SCHEMA,
+  getNoteGuide,
+  buildMapPrompt,
+  buildSynthesisPrompt,
+  prepareTranscriptChunks,
+  verifyMapEvidence,
+  assembleCourseNotes,
   normalizeNoteShape,
 } = require("./ollama.cjs");
 const { toTraditionalTaiwan, normalizeNotes } = require("./text-utils.cjs");
+const { segmentPath, findSegments, prepareRecordingMedia, inspectRecordingAudio } = require("./recording-segments.cjs");
 const APP_VERSION = require("./package.json").version;
 const TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -406,19 +414,12 @@ if (!gotSingleInstanceLock) {
     }
   }
 
-  function textForCourse(courseId) {
-    return courseDb.listSegments(courseId).map((item) => {
-      const seconds = Math.max(0, Number(item.start_ms || 0)) / 1000;
-      const stamp = `${Math.floor(seconds / 60).toString().padStart(2, "0")}:${Math.floor(seconds % 60).toString().padStart(2, "0")}`;
-      return `[${stamp}] ${item.text}`;
-    }).join("\n");
-  }
-
   function noteMarkdown(course, note) {
     const list = (items) => (items || []).map((item) => `- ${item}`).join("\n") || "- 無資料";
+    const points = (items) => (items || []).map((item) => `- ${item.text}（${item.status === "source_matched" ? `原文吻合 [${item.timestamp}]：「${item.quote}」` : `待核：${item.quote ? `原文未吻合「${item.quote}」` : "缺少可回查原文"}`}）`).join("\n") || "- 無資料";
     return [
       `# ${course.title}`, "", "## 課程摘要", note.summary || "無摘要", "",
-      "## 核心重點", list(note.keyPoints), "", "## 重要名詞／公式／定義", list(note.termsAndFormulas), "",
+      ...(note.sections || []).flatMap((section) => [`## ${section.title}${section.timestamp ? ` [${section.timestamp}]` : ""}`, points(section.points), ""]),
       "## 容易混淆或需複習處", list(note.confusions), "", "## 課後複習問題", list(note.reviewQuestions), "",
       "## 一句話總結", note.takeaway || "無總結",
     ].join("\n");
@@ -429,22 +430,27 @@ if (!gotSingleInstanceLock) {
       return await ollama.generateJson(args);
     } catch (error) {
       if (error.code !== "OLLAMA_BAD_JSON") throw error;
-      const raw = String(error.raw || "").slice(0, 12000);
+      // A small local model may hit num_predict in the middle of a JSON
+      // object. Re-run the original task with more room; feeding the broken
+      // output back alongside the transcript makes the context longer and
+      // repeated the same failure on a real 13-minute course.
       return ollama.generateJson({
         ...args,
-        prompt: `上一個模型回覆不是有效 JSON。請只修復並輸出符合欄位要求的 JSON，不要補充不存在的課程內容。原始回覆如下：\n${raw}\n\n${args.prompt}`,
+        prompt: `${args.prompt}\n請用更精簡的措辭涵蓋所有主題，務必輸出完整閉合的 JSON。`,
+        maxOutputTokens: Math.min(2400, Math.max(1200, Number(args.maxOutputTokens || 650) * 2)),
       });
     }
   }
 
   async function generateNotesForCourse(courseId, requestedModel = null) {
     const course = courseDb.getCourse(courseId);
-    const transcript = textForCourse(courseId);
-    if (!course || !transcript.trim()) throw new Error("逐字稿尚未完成，無法整理課程筆記。");
+    const segments = courseDb.listSegments(courseId);
+    if (!course || !segments.length) throw new Error("逐字稿尚未完成，無法整理課程筆記。");
     const model = String(requestedModel || courseDb.getSetting("selectedOllamaModel", DEFAULT_MODEL));
     if (!AVAILABLE_MODELS.some((item) => item.name === model)) throw new Error("尚未選擇有效的 Qwen 模型。");
     courseDb.updateCourse(courseId, { status: "summarizing", model, error: null });
-    courseDb.saveNotes(courseId, { model, status: "processing", json: null, text: null, error: null });
+    courseDb.saveNotes(courseId, { model, status: "processing", error: null });
+    emitUpdated(courseId, "notes-started");
     emitProgress(courseId, "notes", "正在連線到本機 Ollama", 0, { model });
     const status = await ollama.status();
     if (!status.available) {
@@ -457,24 +463,49 @@ if (!gotSingleInstanceLock) {
       error.code = "OLLAMA_MODEL_MISSING";
       throw error;
     }
-    const chunks = [];
-    const maxChars = model === HIGH_QUALITY_MODEL ? 18000 : 11000;
-    for (let index = 0; index < transcript.length; index += maxChars) chunks.push(transcript.slice(index, index + maxChars));
-    const partials = [];
+    const chunks = prepareTranscriptChunks(segments, 2000);
+    if (!chunks.length) throw new Error("逐字稿沒有可整理的文字。");
+    const guide = getNoteGuide();
+    const guideHash = createHash("sha256").update(`evidence-v1\n${guide}\n${JSON.stringify(MAP_SCHEMA)}`).digest("hex");
+    const maps = [];
+    const startedAt = Date.now();
+    let completedSteps = 0;
+    const estimatedTotalSteps = chunks.length + 1;
+    const remainingSeconds = () => completedSteps ? Math.max(0, Math.round((Date.now() - startedAt) / 1000 / completedSteps * (estimatedTotalSteps - completedSteps))) : null;
     for (let index = 0; index < chunks.length; index += 1) {
-      const partPrompt = `${buildNotePrompt(chunks[index], course.title, course.language)}\n這是長課程的其中一段。請只整理本段實際出現的資訊，仍使用完整 JSON 欄位。`;
-      const result = await generateJsonWithRepair({ model, prompt: partPrompt, timeoutMs: 180000 });
-      partials.push(result.value);
-      emitProgress(courseId, "notes", `已整理第 ${index + 1}/${chunks.length} 段`, Math.round(((index + 1) / (chunks.length + 1)) * 80), { model });
+      const chunkHash = createHash("sha256").update(chunks[index]).digest("hex");
+      const cached = verifyMapEvidence(courseDb.getNoteMap(courseId, model, guideHash, index, chunkHash), chunks[index]);
+      if (cached.sections.length) {
+        maps.push(cached);
+        completedSteps += 1;
+        emitProgress(courseId, "notes", `沿用第 ${index + 1}/${chunks.length} 段已核對主題`, Math.round((completedSteps / estimatedTotalSteps) * 100), { model, etaSeconds: remainingSeconds() });
+        continue;
+      }
+      const baseProgress = Math.round((index / estimatedTotalSteps) * 100);
+      emitProgress(courseId, "notes", `擷取主題第 ${index + 1}/${chunks.length} 段`, baseProgress, { model, etaSeconds: remainingSeconds() });
+      const result = await generateJsonWithRepair({ model, prompt: buildMapPrompt(chunks[index], course.title, course.language), system: guide,
+        schema: MAP_SCHEMA, maxOutputTokens: 1500, timeoutMs: 600000,
+        onProgress: ({ characters, evalCount }) => emitProgress(courseId, "notes", `擷取第 ${index + 1}/${chunks.length} 段：已生成 ${characters} 字${evalCount ? `／${evalCount} token` : ""}`, baseProgress, { model, etaSeconds: remainingSeconds() }),
+      });
+      const map = verifyMapEvidence(result.value, chunks[index]);
+      if (!map.sections.length) throw new Error(`第 ${index + 1} 段沒有擷取到主題；已保留舊筆記，請檢查逐字稿後重試。`);
+      courseDb.saveNoteMap(courseId, model, guideHash, index, chunkHash, map);
+      maps.push(map);
+      completedSteps += 1;
+      emitProgress(courseId, "notes", `已擷取第 ${index + 1}/${chunks.length} 段：${map.sections.length} 個主題`, Math.round((completedSteps / estimatedTotalSteps) * 100), { model, etaSeconds: remainingSeconds() });
     }
-    const combined = partials.length === 1
-      ? partials[0]
-      : await generateJsonWithRepair({
-        model,
-        prompt: `${buildNotePrompt(JSON.stringify(partials), course.title, course.language)}\n以上是同一門長課程的分段整理。請去除重複、合併相同概念，只保留逐字稿可支持的內容，輸出完整最終 JSON。`,
-        timeoutMs: 240000,
-      }).then((result) => result.value);
-    const note = normalizeNotes(normalizeNoteShape(combined), course.language);
+    emitProgress(courseId, "notes", "正在撰寫跨主題摘要；各段主題已保留", Math.round((completedSteps / estimatedTotalSteps) * 100), { model, etaSeconds: remainingSeconds() });
+    let synthesis = {};
+    try {
+      const result = await generateJsonWithRepair({ model, prompt: buildSynthesisPrompt(maps, course.title, course.language), system: guide,
+        schema: SYNTHESIS_SCHEMA, maxOutputTokens: 600, timeoutMs: 600000,
+        onProgress: ({ characters }) => emitProgress(courseId, "notes", `撰寫全課摘要：已生成 ${characters} 字`, Math.round((completedSteps / estimatedTotalSteps) * 100), { model, etaSeconds: remainingSeconds() }),
+      });
+      synthesis = result.value;
+    } catch (error) {
+      startupLog(`全課摘要生成失敗，保留已完成主題：${error.message}`);
+    }
+    const note = normalizeNotes(assembleCourseNotes(maps, synthesis), course.language);
     const saved = courseDb.saveNotes(courseId, { model, status: "ready", json: note, text: noteMarkdown(course, note), error: null });
     courseDb.updateCourse(courseId, { status: "ready", model, error: null });
     emitProgress(courseId, "notes", "課程筆記完成", 100, { model });
@@ -498,6 +529,14 @@ if (!gotSingleInstanceLock) {
 
   async function processLiveAudio(sessionState, samples, sampleRate, startMs) {
     const audio = resampleFloat(samples, Number(sampleRate) || 16000, 16000);
+    let energy = 0;
+    let peak = 0;
+    for (const value of audio) { energy += value * value; peak = Math.max(peak, Math.abs(value)); }
+    if (peak < 0.005 || Math.sqrt(energy / Math.max(1, audio.length)) < 0.0007) {
+      sessionState.processedMs = Math.max(sessionState.processedMs, (Number(startMs) || 0) + Math.round(audio.length / 16));
+      emitProgress(sessionState.courseId, "transcribe", "此段沒有有效聲音，已略過以避免產生錯誤文字", null, { live: true, audioWarning: true });
+      return;
+    }
     const segments = await recognizeAudio(audio, Number(startMs) || 0, sessionState.language, sessionState.courseId);
     courseDb.addSegments(sessionState.courseId, sessionState.mediaId, segments, sessionState.language);
     sessionState.processedMs = Math.max(sessionState.processedMs, (Number(startMs) || 0) + Math.round(audio.length / 16));
@@ -512,31 +551,29 @@ if (!gotSingleInstanceLock) {
     try { await sessionState.videoQueue; } catch (error) { processingError = processingError || error; }
     let media = null;
     try {
-      const stats = await fs.stat(sessionState.tempVideo);
-      if (stats.size > 0) {
-        const moved = await moveIntoLibrary(sessionState.tempVideo, sessionState.courseId, `${safeBaseName(sessionState.title)}-${recordingStamp()}.webm`);
-        media = courseDb.upsertMedia({
-          id: sessionState.mediaId || randomUUID(), courseId: sessionState.courseId, filePath: moved.filePath,
-          originalName: sessionState.originalName, mimeType: "video/webm", mediaType: "video", extension: "webm",
-          size: moved.size, sha256: moved.sha256, processingStatus: "ready",
-        });
-      } else if (sessionState.mediaId) {
-        processingError = processingError || new Error("錄影沒有留下可用的影片檔。");
-        courseDb.updateMedia(sessionState.mediaId, { processingStatus: "failed", size: 0 });
-      }
+      const prepared = await prepareRecordingMedia({ ffmpegPath, stagingRoot, courseId: sessionState.courseId, segmentPaths: sessionState.segmentPaths });
+      const health = await inspectRecordingAudio(ffmpegPath, prepared.filePath);
+      if (!health.audioOk) processingError = processingError || new Error(`錄影聲音在 ${Math.round(health.audioSeconds || 0)} 秒後中斷，影像持續到 ${Math.round(health.videoSeconds || 0)} 秒；影片已保留，後續逐字稿不可信。`);
+      const moved = await moveIntoLibrary(prepared.filePath, sessionState.courseId, `${safeBaseName(sessionState.title)}-${recordingStamp()}.webm`);
+      media = courseDb.upsertMedia({
+        id: sessionState.mediaId || randomUUID(), courseId: sessionState.courseId, filePath: moved.filePath,
+        originalName: sessionState.originalName, mimeType: "video/webm", mediaType: "video", extension: "webm",
+        size: moved.size, sha256: moved.sha256, processingStatus: "ready",
+      });
+      for (const filePath of prepared.cleanup) await removePathIfExists(filePath);
     } catch (error) { processingError = processingError || error; startupLog(`錄影檔整理失敗: ${error.stack || error.message}`); }
-    // moveIntoLibrary renames the staging file on success. If it failed, keep
-    // the partial recording so the next launch can recover it instead of
-    // silently deleting the only copy.
-    if (media) await removePathIfExists(sessionState.tempVideo);
-    else if (sessionState.mediaId) {
-      try {
-        const stats = await fs.stat(sessionState.tempVideo);
-        courseDb.updateMedia(sessionState.mediaId, { processingStatus: stats.size > 0 ? "interrupted" : "failed", size: stats.size });
-      } catch {}
+    // Failed merges leave every original segment in staging for recovery.
+    if (!media && sessionState.mediaId) {
+      const sizes = await Promise.all(sessionState.segmentPaths.map(async (filePath) => {
+        try { return (await fs.stat(filePath)).size; } catch { return 0; }
+      }));
+      const size = sizes.reduce((total, value) => total + value, 0);
+      courseDb.updateMedia(sessionState.mediaId, { processingStatus: size > 0 ? "interrupted" : "failed", size });
     }
     if (media) {
       courseDb.updateCourse(sessionState.courseId, { status: "transcribing", error: processingError ? processingError.message : null });
+      emitUpdated(sessionState.courseId, "media-ready");
+      emitProgress(sessionState.courseId, "transcribe", "影片已保存，正在完成逐字稿與筆記", 90);
     }
     const segments = courseDb.listSegments(sessionState.courseId);
     if (!processingError && segments.length) {
@@ -649,15 +686,17 @@ if (!gotSingleInstanceLock) {
       const course = courseDb.getCourse(media.course_id);
       if (!course) continue;
       try {
-        const stats = await fs.stat(media.file_path);
-        if (stats.isFile() && stats.size > 0) {
-          const moved = await moveIntoLibrary(media.file_path, media.course_id, media.original_name);
+        const segmentPaths = await findSegments(stagingRoot, media.course_id, media.file_path);
+        if (segmentPaths.length) {
+          const prepared = await prepareRecordingMedia({ ffmpegPath, stagingRoot, courseId: media.course_id, segmentPaths });
+          const moved = await moveIntoLibrary(prepared.filePath, media.course_id, media.original_name);
           courseDb.upsertMedia({
             id: media.id, courseId: media.course_id, filePath: moved.filePath,
             originalName: media.original_name, mimeType: media.mime_type || "video/webm",
             mediaType: media.media_type, extension: media.extension || "webm", size: moved.size,
             sha256: moved.sha256, processingStatus: "ready",
           });
+          for (const filePath of prepared.cleanup) await removePathIfExists(filePath);
           courseDb.updateCourse(media.course_id, { status: "failed", error: "上次錄影未正常結束；已保留影片，可按「重新轉錄」繼續處理。" });
           startupLog(`已復原中斷錄影：${course.title}`);
           continue;
@@ -669,6 +708,14 @@ if (!gotSingleInstanceLock) {
         courseDb.updateCourse(media.course_id, { status: "failed", error: "上次錄影未正常結束，暫存影片仍保留；請檢查磁碟空間後重試。" });
         startupLog(`中斷錄影待人工處理：${error.message}`);
       }
+    }
+  }
+
+  function recoverInterruptedNotes() {
+    for (const row of courseDb.all("SELECT id FROM courses WHERE status='summarizing'")) {
+      const message = "上次課程整理未完成；已保留逐字稿與前次筆記，可重新整理。";
+      courseDb.updateCourse(row.id, { status: "failed", error: message });
+      if (courseDb.getNotes(row.id)?.status === "processing") courseDb.saveNotes(row.id, { status: "error", error: message });
     }
   }
 
@@ -749,6 +796,11 @@ if (!gotSingleInstanceLock) {
     ipcMain.handle("courses:get", (_event, courseId) => publicDetail(courseDb.getCourseDetail(validateCourseId(courseId))));
     ipcMain.handle("courses:create", (_event, input) => publicCourse(courseDb.createCourse(makeCourseInput(input))));
     ipcMain.handle("courses:update", (_event, { courseId, patch }) => publicCourse(courseDb.updateCourse(validateCourseId(courseId), patch || {})));
+    ipcMain.handle("courses:set-category", (_event, { courseId, categoryId }) => {
+      const course = courseDb.setCourseCategory(validateCourseId(courseId), categoryId);
+      emitUpdated(course.id, "category");
+      return publicCourse(course);
+    });
     ipcMain.handle("courses:trash", (_event, courseId) => moveCourseToTrash(courseId));
     ipcMain.handle("courses:restore", (_event, courseId) => restoreCourseFromTrash(courseId));
     ipcMain.handle("courses:delete-permanently", async (_event, courseId) => {
@@ -860,7 +912,7 @@ if (!gotSingleInstanceLock) {
     ipcMain.handle("recording:begin", async (_event, { courseId, title, language, model }) => {
       const id = validateCourseId(courseId);
       if (liveSessions.has(id)) throw new Error("這門課已在錄製中。");
-      const tempVideo = path.join(stagingRoot, `${id}-${randomUUID()}.webm.part`);
+      const tempVideo = segmentPath(stagingRoot, id, 0);
       const originalName = `${safeBaseName(title)}-${recordingStamp()}.webm`;
       await fs.mkdir(stagingRoot, { recursive: true });
       await fs.writeFile(tempVideo, Buffer.alloc(0));
@@ -872,7 +924,8 @@ if (!gotSingleInstanceLock) {
       const sessionState = {
         courseId: id, title: String(title || "未命名課程"), language: String(language || "zh-TW"),
         model: AVAILABLE_MODELS.some((item) => item.name === model) ? model : courseDb.getSetting("selectedOllamaModel", DEFAULT_MODEL),
-        tempVideo, originalName, videoQueue: Promise.resolve(), audioQueue: Promise.resolve(), mediaId: media.id,
+        tempVideo, segmentPaths: [tempVideo], segmentIndex: 0, segmentOpen: true,
+        originalName, videoQueue: Promise.resolve(), audioQueue: Promise.resolve(), mediaId: media.id,
         processedMs: 0, expectedMs: 0, error: null,
       };
       liveSessions.set(id, sessionState);
@@ -883,11 +936,42 @@ if (!gotSingleInstanceLock) {
     ipcMain.handle("recording:video-chunk", (_event, { courseId, bytes }) => {
       const state = liveSessions.get(validateCourseId(courseId));
       if (!state) throw new Error("找不到正在錄製的課程");
+      if (!state.segmentOpen) throw new Error("錄影目前已暫停，不能寫入影片片段");
       const buffer = toBuffer(bytes);
       if (!buffer.length) return { accepted: false };
       state.videoQueue = state.videoQueue.then(() => fs.appendFile(state.tempVideo, buffer));
       state.videoQueue = state.videoQueue.catch((error) => { state.error = state.error || error; throw error; });
       return { accepted: true, bytes: buffer.length };
+    });
+    ipcMain.handle("recording:pause", async (_event, { courseId }) => {
+      const state = liveSessions.get(validateCourseId(courseId));
+      if (!state) throw new Error("找不到正在錄製的課程");
+      if (!state.segmentOpen) return { paused: true };
+      await state.videoQueue;
+      state.segmentOpen = false;
+      const stats = await fs.stat(state.tempVideo);
+      courseDb.updateMedia(state.mediaId, { size: stats.size });
+      if (stats.size === 0) return { paused: true, videoSeconds: 0, audioSeconds: 0, audioOk: true };
+      const health = await inspectRecordingAudio(ffmpegPath, state.tempVideo);
+      if (!health.audioOk) {
+        state.error = state.error || new Error("錄影片段的聲音比影像提早中斷；已保留影片，請檢查系統音訊來源。");
+      }
+      return { paused: true, ...health };
+    });
+    ipcMain.handle("recording:resume", async (_event, { courseId }) => {
+      const state = liveSessions.get(validateCourseId(courseId));
+      if (!state) throw new Error("找不到正在錄製的課程");
+      if (state.segmentOpen) throw new Error("錄影尚未暫停");
+      if (state.segmentIndex >= 999) throw new Error("錄影片段數已達上限，請先停止並保存課程。");
+      const nextIndex = state.segmentIndex + 1;
+      const nextPath = segmentPath(stagingRoot, state.courseId, nextIndex);
+      await fs.writeFile(nextPath, Buffer.alloc(0), { flag: "wx" });
+      state.segmentIndex = nextIndex;
+      state.segmentPaths.push(nextPath);
+      state.tempVideo = nextPath;
+      state.videoQueue = Promise.resolve();
+      state.segmentOpen = true;
+      return { resumed: true, segment: nextIndex };
     });
     ipcMain.handle("recording:audio-chunk", (_event, { courseId, samples, sampleRate, startMs, expectedMs }) => {
       const state = liveSessions.get(validateCourseId(courseId));
@@ -942,6 +1026,7 @@ if (!gotSingleInstanceLock) {
       courseDb = new CourseDatabase(path.join(userData, "coursescribe.sqlite"));
       ollama = new OllamaClient();
       await recoverInterruptedRecordings();
+      recoverInterruptedNotes();
       await purgeExpiredTrash();
       protocol.handle("coursescribe-media", async (request) => {
         try {

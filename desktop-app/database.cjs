@@ -86,6 +86,17 @@ class CourseDatabase {
         updated_at TEXT NOT NULL,
         FOREIGN KEY(course_id) REFERENCES courses(id) ON DELETE CASCADE
       );
+      CREATE TABLE IF NOT EXISTS note_map_cache (
+        course_id TEXT NOT NULL,
+        model TEXT NOT NULL,
+        guide_hash TEXT NOT NULL,
+        chunk_index INTEGER NOT NULL,
+        chunk_hash TEXT NOT NULL,
+        json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(course_id, model, guide_hash, chunk_index, chunk_hash),
+        FOREIGN KEY(course_id) REFERENCES courses(id) ON DELETE CASCADE
+      );
       CREATE TABLE IF NOT EXISTS categories (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL UNIQUE,
@@ -207,6 +218,14 @@ class CourseDatabase {
       normalizeId(id),
     );
     return this.getCourse(id);
+  }
+
+  setCourseCategory(id, categoryId) {
+    const course = this.getCourse(id);
+    if (!course || course.deleted_at) throw new Error("找不到可編輯的課程");
+    const selected = categoryId == null || categoryId === "" ? null : String(categoryId);
+    if (selected && !this.get("SELECT id FROM categories WHERE id=?", selected)) throw new Error("選取的分類不存在");
+    return this.updateCourse(id, { categoryId: selected });
   }
 
   listCourses(filters = {}) {
@@ -345,9 +364,15 @@ class CourseDatabase {
 
   saveNotes(courseId, input = {}) {
     const timestamp = now();
-    const id = input.id || randomUUID();
-    this.run("DELETE FROM notes WHERE course_id=?", normalizeId(courseId));
-    this.run("INSERT INTO notes(id,course_id,model,status,json,text,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", id, normalizeId(courseId), input.model || null, input.status || "ready", input.json ? JSON.stringify(input.json) : null, input.text || null, input.error || null, timestamp, timestamp);
+    const previous = this.getNotes(courseId);
+    const id = input.id || previous?.id || randomUUID();
+    const json = input.json === undefined ? previous?.json : input.json;
+    const noteText = input.text === undefined ? previous?.text : input.text;
+    if (previous) {
+      this.run("UPDATE notes SET model=?,status=?,json=?,text=?,error=?,updated_at=? WHERE id=?", input.model || previous.model || null, input.status || "ready", json ? JSON.stringify(json) : null, noteText || null, input.error || null, timestamp, previous.id);
+    } else {
+      this.run("INSERT INTO notes(id,course_id,model,status,json,text,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", id, normalizeId(courseId), input.model || null, input.status || "ready", json ? JSON.stringify(json) : null, noteText || null, input.error || null, timestamp, timestamp);
+    }
     return this.getNotes(courseId);
   }
 
@@ -357,6 +382,16 @@ class CourseDatabase {
     let json = null;
     try { json = row.json ? JSON.parse(row.json) : null; } catch { json = null; }
     return { ...row, json };
+  }
+
+  getNoteMap(courseId, model, guideHash, chunkIndex, chunkHash) {
+    const row = this.get("SELECT json FROM note_map_cache WHERE course_id=? AND model=? AND guide_hash=? AND chunk_index=? AND chunk_hash=?", normalizeId(courseId), String(model), String(guideHash), Number(chunkIndex), String(chunkHash));
+    if (!row) return null;
+    try { return JSON.parse(row.json); } catch { return null; }
+  }
+
+  saveNoteMap(courseId, model, guideHash, chunkIndex, chunkHash, map) {
+    this.run("INSERT OR REPLACE INTO note_map_cache(course_id,model,guide_hash,chunk_index,chunk_hash,json,created_at) VALUES(?,?,?,?,?,?,?)", normalizeId(courseId), String(model), String(guideHash), Number(chunkIndex), String(chunkHash), JSON.stringify(map), now());
   }
 
   listCategories() {

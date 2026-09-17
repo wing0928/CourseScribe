@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld("courseCapture", {
     get: (courseId) => ipcRenderer.invoke("courses:get", courseId),
     create: (input) => ipcRenderer.invoke("courses:create", input || {}),
     update: (courseId, patch) => ipcRenderer.invoke("courses:update", { courseId, patch: patch || {} }),
+    setCategory: (courseId, categoryId) => ipcRenderer.invoke("courses:set-category", { courseId, categoryId }),
     trash: (courseId) => ipcRenderer.invoke("courses:trash", courseId),
     restore: (courseId) => ipcRenderer.invoke("courses:restore", courseId),
     deletePermanently: (courseId) => ipcRenderer.invoke("courses:delete-permanently", courseId),
@@ -58,6 +59,8 @@ contextBridge.exposeInMainWorld("courseCapture", {
     begin: (payload) => ipcRenderer.invoke("recording:begin", payload || {}),
     videoChunk: (courseId, bytes) => ipcRenderer.invoke("recording:video-chunk", { courseId, bytes }),
     audioChunk: (payload) => ipcRenderer.invoke("recording:audio-chunk", payload || {}),
+    pause: (courseId) => ipcRenderer.invoke("recording:pause", { courseId }),
+    resume: (courseId) => ipcRenderer.invoke("recording:resume", { courseId }),
     finish: (courseId) => ipcRenderer.invoke("recording:finish", { courseId }),
   },
   widget: {

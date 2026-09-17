@@ -24,6 +24,7 @@ const els = {
   progressCopy: $(`[data-progress-copy]`),
   progressPercent: $(`[data-progress-percent]`),
   progressBar: $(`[data-progress-bar]`),
+  progressEta: $(`[data-progress-eta]`),
   homeNotes: $(`[data-home-notes]`),
   homeNotesModel: $(`[data-notes-model]`),
   homeOpen: $(`[data-home-open]`),
@@ -64,6 +65,7 @@ const state = {
   models: { available: false, models: [], choices: [], selected: "qwen3:4b" },
   modelPulling: "",
   recording: null,
+  notesProgress: new Map(),
 };
 
 const STATUS_LABELS = {
@@ -248,29 +250,53 @@ function setProgress(data = {}) {
   const safe = Number.isFinite(progress) ? Math.max(0, Math.min(100, Math.round(progress))) : 0;
   els.progressPercent.textContent = Number.isFinite(progress) ? `${safe}%` : "…";
   els.progressBar.style.width = `${safe}%`;
+  if (els.progressEta) els.progressEta.textContent = data.stage === "notes" ? `本機 ${data.model || "Ollama"} · 預估剩餘時間：${formatEta(data.etaSeconds)}` : "";
   if (data.stage === "error") setStatus(data.detail || "處理失敗", "error");
   else if (data.stage === "complete") setStatus(data.detail || "課程處理完成", "success");
   else if (data.detail) setStatus(data.detail);
 }
 
+function formatEta(seconds) {
+  if (!Number.isFinite(Number(seconds)) || seconds == null) return "估算中";
+  const minutes = Math.ceil(Math.max(0, Number(seconds)) / 60);
+  if (minutes < 1) return "約 1 分鐘內";
+  if (minutes < 60) return `約 ${minutes} 分鐘`;
+  return `約 ${Math.floor(minutes / 60)} 小時 ${minutes % 60} 分鐘`;
+}
+
 function renderNotes(note, target, modelLabel = "") {
   if (!note?.json) {
     target.className = "notes-content empty";
-    target.innerHTML = `<span>✦</span><b>${note?.status === "error" ? "課程筆記尚未完成" : "完成課後轉錄後整理"}</b><p>${escapeHtml(note?.error || "本機 Qwen 會整理摘要、重點、名詞與複習問題。")}</p>`;
+    target.innerHTML = `<span>✦</span><b>${note?.status === "error" ? "課程筆記尚未完成" : "完成課後轉錄後整理"}</b><p>${escapeHtml(note?.error || "本機 Qwen 會依逐字稿整理各主題、全課概覽與複習問題。")}</p>`;
     return;
   }
   const data = note.json;
-  const list = (items) => (Array.isArray(items) && items.length ? `<ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : `<p class="muted">無資料</p>`);
   target.className = "notes-content";
-  target.innerHTML = `${modelLabel ? `<p class="model-label">由 ${escapeHtml(modelLabel)} 整理</p>` : ""}<h3>課程摘要</h3><p>${escapeHtml(data.summary || "無摘要")}</p><h3>核心重點</h3>${list(data.keyPoints)}<h3>重要名詞／公式／定義</h3>${list(data.termsAndFormulas)}<h3>容易混淆或需複習處</h3>${list(data.confusions)}<h3>課後複習問題</h3>${list(data.reviewQuestions)}<h3>一句話總結</h3><p>${escapeHtml(data.takeaway || "無總結")}</p>`;
+  target.innerHTML = `${modelLabel ? `<p class="model-label">由 ${escapeHtml(modelLabel)} 整理${note.status === "processing" ? " · 正在更新，以下為前次筆記" : note.status === "error" ? " · 本次更新失敗，以下為前次筆記" : ""}</p>` : ""}${renderNoteBody(data)}`;
+}
+
+function renderNoteBody(data) {
+  const list = (items) => (Array.isArray(items) && items.length ? `<ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : `<p class="muted">無資料</p>`);
+  const points = (items) => (Array.isArray(items) && items.length ? `<ul class="evidence-points">${items.map((raw) => {
+    const point = typeof raw === "string" ? { text: raw } : raw || {};
+    const matched = point.status === "source_matched" && point.quote && point.timestamp;
+    const stamp = matched ? `<span class="evidence-stamp">[${escapeHtml(point.timestamp)}]</span> ` : "";
+    return `<li><div>${escapeHtml(point.text || "")}</div><small class="evidence-status ${matched ? "matched" : "pending"}">${stamp}${matched ? "原文吻合" : "待核"}</small><blockquote>${matched ? escapeHtml(point.quote) : escapeHtml(point.quote ? `引文未在逐字稿中吻合：「${point.quote}」` : "沒有可回查的原文；舊版筆記請重新整理。")}</blockquote></li>`;
+  }).join("")}</ul>` : `<p class="muted">無資料</p>`);
+  const sections = (data.sections || []).map((section) => `<h3>${escapeHtml(section.title)}${section.timestamp ? ` <small>[${escapeHtml(section.timestamp)}]</small>` : ""}</h3>${points(section.points)}`).join("");
+  const summary = String(data.summary || "").replace(/^本課涵蓋：[^。]+。/, "").trim() || `已整理 ${(data.sections || []).length} 個課程主題，請依下方時間戳核對。`;
+  return `<p class="note-caveat">AI 只根據語音逐字稿整理，並非事實查核。「原文吻合」只表示引文出現在逐字稿；逐字稿或解讀仍可能有錯。全課概覽也屬未逐句核對的 AI 摘要。</p><h3>全課概覽</h3><p>${escapeHtml(summary)}</p>${sections}<h3>待確認／容易混淆處</h3>${list(data.confusions)}<h3>課後複習問題</h3>${list(data.reviewQuestions)}<h3>一句話總結</h3><p>${escapeHtml(data.takeaway || "無總結")}</p>`;
 }
 
 function notePlainText(note) {
   if (!note) return "";
-  if (note.text) return note.text;
   const json = note.json;
-  if (!json) return "";
-  return [`課程摘要\n${json.summary || ""}`, `核心重點\n${(json.keyPoints || []).map((item) => `• ${item}`).join("\n")}`, `重要名詞／公式／定義\n${(json.termsAndFormulas || []).map((item) => `• ${item}`).join("\n")}`, `容易混淆或需複習處\n${(json.confusions || []).map((item) => `• ${item}`).join("\n")}`, `課後複習問題\n${(json.reviewQuestions || []).map((item) => `• ${item}`).join("\n")}`, `一句話總結\n${json.takeaway || ""}`].join("\n\n");
+  if (!json) return note.text || "";
+  const summary = String(json.summary || "").replace(/^本課涵蓋：[^。]+。/, "").trim();
+  return [`全課概覽\n${summary}`, ...(json.sections || []).map((section) => `${section.title}${section.timestamp ? ` [${section.timestamp}]` : ""}\n${(section.points || []).map((raw) => {
+    const point = typeof raw === "string" ? { text: raw } : raw || {};
+    return `• ${point.text || ""}（${point.status === "source_matched" ? `原文吻合 [${point.timestamp}]：「${point.quote}」` : `待核${point.quote ? `：引文未吻合「${point.quote}」` : "：無可回查原文"}`}）`;
+  }).join("\n")}`), `待確認／容易混淆處\n${(json.confusions || []).map((item) => `• ${item}`).join("\n")}`, `課後複習問題\n${(json.reviewQuestions || []).map((item) => `• ${item}`).join("\n")}`, `一句話總結\n${json.takeaway || ""}`].join("\n\n");
 }
 
 async function refreshHomeNotes(courseId = state.courseId) {
@@ -305,8 +331,7 @@ function concatFloat(a, b) {
 
 function setupPcmCapture(recording, stream) {
   if (!stream.getAudioTracks().length) {
-    setStatus("已開始錄影，但沒有取得系統聲音；停止後將無法產生逐字稿。", "error");
-    return;
+    throw new Error("沒有取得系統聲音；請確認課程正在播放，並重新選擇可擷取聲音的螢幕或視窗。");
   }
   const context = new AudioContext();
   const source = context.createMediaStreamSource(stream);
@@ -316,9 +341,19 @@ function setupPcmCapture(recording, stream) {
   recording.audioContext = context;
   recording.audioProcessor = processor;
   recording.pcm = new Float32Array(0);
-  recording.pcmStartSample = 0;
+  recording.pcmStartSample = Math.round((recording.audioElapsedMs || 0) / 1000 * context.sampleRate);
   recording.sampleRate = context.sampleRate;
-  recording.audioQueue = Promise.resolve();
+  recording.audioQueue ||= Promise.resolve();
+  recording.audioLost = false;
+  recording.audioSignalSamples = 0;
+  recording.audioSignalPeak = 0;
+  recording.audioSignalChecked = false;
+  for (const track of stream.getAudioTracks()) {
+    track.addEventListener("ended", () => {
+      recording.audioLost = true;
+      setStatus("系統音訊已中斷；影片仍在錄製，但逐字稿已暫停。請先暫停再繼續，以重新取得音訊。", "error");
+    }, { once: true });
+  }
   const flush = (force = false) => {
     const chunkSamples = Math.round(recording.sampleRate * 20);
     const overlapSamples = Math.round(recording.sampleRate * 2);
@@ -341,8 +376,17 @@ function setupPcmCapture(recording, stream) {
     }
   };
   processor.onaudioprocess = (event) => {
-    if (recording.paused || recording.stopping) return;
+    if (recording.paused || recording.stopping || recording.audioLost) return;
     const channel = event.inputBuffer.getChannelData(0);
+    if (!recording.audioSignalChecked) {
+      for (const value of channel) recording.audioSignalPeak = Math.max(recording.audioSignalPeak, Math.abs(value));
+      recording.audioSignalSamples += channel.length;
+      if (recording.audioSignalSamples >= recording.sampleRate * 5) {
+        recording.audioSignalChecked = true;
+        if (recording.audioSignalPeak < 0.005) setStatus("尚未偵測到有效的系統聲音。請確認課程正在播放且來源未靜音；無聲片段不會產生逐字稿。", "error");
+        else if (recording.segmentIndex > 0) setStatus("已確認恢復錄影後有系統聲音。", "success");
+      }
+    }
     recording.pcm = concatFloat(recording.pcm, channel);
     flush(false);
   };
@@ -352,22 +396,55 @@ function setupPcmCapture(recording, stream) {
   recording.flushPcm = flush;
 }
 
+function startCaptureSegment(recording, stream) {
+  recording.stream = stream;
+  setupPcmCapture(recording, stream);
+  const mimeType = recordingMimeType();
+  const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+  recording.recorder = recorder;
+  recorder.ondataavailable = (event) => {
+    if (!event.data?.size) return;
+    recording.videoQueue = recording.videoQueue.then(() => event.data.arrayBuffer()).then((bytes) => window.courseCapture.recording.videoChunk(recording.courseId, bytes));
+  };
+  recorder.onerror = (event) => { setStatus(`錄影錯誤：${event.error?.message || "無法繼續錄影"}`, "error"); };
+  recorder.start(1000);
+}
+
+async function closeCaptureSegment(recording) {
+  recording.flushPcm?.(true);
+  recording.audioElapsedMs = recording.pcmStartSample / recording.sampleRate * 1000;
+  const recorder = recording.recorder;
+  if (recorder && recorder.state !== "inactive") await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("停止錄影片段逾時；原始資料已保留，請重新開啟應用程式查看草稿。")), 10000);
+    recorder.addEventListener("stop", () => { clearTimeout(timeout); resolve(); }, { once: true });
+    try { recorder.stop(); } catch (error) { clearTimeout(timeout); reject(error); }
+  });
+  await recording.videoQueue;
+  recording.stream?.getTracks().forEach((track) => track.stop());
+  recording.audioProcessor?.disconnect();
+  await recording.audioContext?.close();
+  recording.recorder = null;
+  recording.stream = null;
+  return window.courseCapture.recording.pause(recording.courseId);
+}
+
 async function startRecording() {
   if (state.recording) return;
   if (!state.selectedSourceId) { setStatus("請先在上方選擇要錄製的螢幕或課程視窗。", "error"); return; }
   let course;
+  let stream;
   try {
     course = await window.courseCapture.recording.create(courseInput());
-    const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: true });
+    stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: true });
+    if (!stream.getAudioTracks().some((track) => track.readyState === "live")) throw new Error("錄影來源沒有可用的系統音訊軌，請改選可錄到課程聲音的來源。");
     await window.courseCapture.recording.begin({ courseId: course.id, ...courseInput() });
-    const mimeType = recordingMimeType();
-    const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
     const recording = {
       courseId: course.id,
       stream,
-      recorder,
+      recorder: null,
       videoQueue: Promise.resolve(),
       audioQueue: Promise.resolve(),
+      audioElapsedMs: 0,
       stopping: false,
       paused: false,
       startedAt: Date.now(),
@@ -376,13 +453,7 @@ async function startRecording() {
       clockTimer: null,
     };
     state.recording = recording;
-    recorder.ondataavailable = (event) => {
-      if (!event.data?.size) return;
-      recording.videoQueue = recording.videoQueue.then(() => event.data.arrayBuffer()).then((bytes) => window.courseCapture.recording.videoChunk(recording.courseId, bytes));
-    };
-    recorder.onerror = (event) => { setStatus(`錄影錯誤：${event.error?.message || "無法繼續錄影"}`, "error"); };
-    recorder.start(1000);
-    setupPcmCapture(recording, stream);
+    startCaptureSegment(recording, stream);
     els.record.classList.add("active");
     els.recordLabel.textContent = "停止錄製";
     els.recordIcon.textContent = "■";
@@ -397,6 +468,12 @@ async function startRecording() {
     startRecordingClock(recording);
     setStatus("正在錄影；課程結束後按停止，系統會完成逐字稿與課程筆記。", "success");
   } catch (error) {
+    stream?.getTracks().forEach((track) => track.stop());
+    if (state.recording?.courseId === course?.id) {
+      state.recording.audioProcessor?.disconnect();
+      state.recording.audioContext?.close().catch(() => {});
+      state.recording = null;
+    }
     if (course?.id) { try { await window.courseCapture.courses.update(course.id, { status: "failed", error: error.message }); } catch {} }
     setStatus(`無法開始錄影：${error.message || "請確認已選擇來源"}`, "error");
   }
@@ -404,59 +481,78 @@ async function startRecording() {
 
 async function toggleRecordingPause(forceAction = "") {
   const recording = state.recording;
-  if (!recording || recording.stopping) return;
+  if (!recording || recording.stopping || recording.transitioning) return;
+  recording.transitioning = true;
+  els.pauseRecording.disabled = true;
+  els.record.disabled = true;
   const shouldResume = forceAction === "resume" || (!forceAction && recording.paused);
   const shouldPause = forceAction === "pause" || (!forceAction && !recording.paused);
   try {
     if (shouldPause && !recording.paused) {
-      if (recording.recorder.state === "recording") recording.recorder.pause();
-      await recording.audioContext?.suspend();
       recording.paused = true;
       recording.pausedAt = Date.now();
+      const health = await closeCaptureSegment(recording);
       els.pauseRecording.textContent = "繼續錄影";
       els.state.textContent = "已暫停";
-      setStatus("錄影已暫停；按「繼續錄影」後接續同一堂課。", "success");
+      setStatus(health.audioOk ? "錄影已暫停；繼續時會重新取得系統聲音。" : "錄影已暫停，但本段聲音可能提早中斷；影片已保留，繼續時會重新取得音訊。", health.audioOk ? "success" : "error");
     } else if (shouldResume && recording.paused) {
+      const sources = await window.courseCapture.capture.listSources();
+      if (!sources.some((source) => source.id === state.selectedSourceId) || !await window.courseCapture.capture.selectSource(state.selectedSourceId)) {
+        throw new Error("原課程視窗或螢幕來源已不存在；請在首頁重新選擇來源後再繼續。");
+      }
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: true });
+      if (!stream.getAudioTracks().some((track) => track.readyState === "live")) {
+        stream.getTracks().forEach((track) => track.stop());
+        throw new Error("重新擷取後仍沒有系統音訊；錄影維持暫停，請重新選擇來源。");
+      }
+      try {
+        await window.courseCapture.recording.resume(recording.courseId);
+        recording.videoQueue = Promise.resolve();
+        recording.segmentIndex = (recording.segmentIndex || 0) + 1;
+        startCaptureSegment(recording, stream);
+      } catch (error) {
+        stream.getTracks().forEach((track) => track.stop());
+        recording.audioProcessor?.disconnect();
+        recording.audioContext?.close().catch(() => {});
+        await window.courseCapture.recording.pause(recording.courseId).catch(() => {});
+        throw error;
+      }
       recording.pausedTotal += Date.now() - recording.pausedAt;
       recording.pausedAt = 0;
       recording.paused = false;
-      await recording.audioContext?.resume();
-      if (recording.recorder.state === "paused") recording.recorder.resume();
       els.pauseRecording.textContent = "暫停錄影";
       els.state.textContent = "錄製中";
-      setStatus("已繼續錄影與背景轉錄。", "success");
+      setStatus("已重新取得系統音訊軌，正在確認是否有有效聲音。", "success");
     }
     publishRecordingWidget();
   } catch (error) {
-    setStatus(`無法${recording.paused ? "繼續" : "暫停"}錄影：${error.message || "請再試一次"}`, "error");
+    setStatus(`暫停／繼續錄影失敗：${error.message || "請再試一次"}。原始片段已保留，必要時請按停止。`, "error");
+  } finally {
+    recording.transitioning = false;
+    els.pauseRecording.disabled = false;
+    els.record.disabled = false;
   }
 }
 
 async function stopRecording() {
   const recording = state.recording;
-  if (!recording || recording.stopping) return;
+  if (!recording || recording.stopping || recording.transitioning) return;
   recording.stopping = true;
   clearInterval(recording.clockTimer);
   els.record.disabled = true;
   els.pauseRecording.disabled = true;
   setStatus("正在保存影片並完成最後一段背景轉錄…");
   try {
-    recording.flushPcm?.(true);
-    await new Promise((resolve) => {
-      if (recording.recorder.state === "inactive") resolve();
-      else { recording.recorder.addEventListener("stop", resolve, { once: true }); recording.recorder.stop(); }
-    });
-    recording.stream.getTracks().forEach((track) => track.stop());
-    recording.audioProcessor?.disconnect();
-    recording.audioContext?.close().catch(() => {});
+    if (!recording.paused) await closeCaptureSegment(recording);
     let queueError = null;
     try { await recording.videoQueue; } catch (error) { queueError = error; }
     try { await recording.audioQueue; } catch (error) { queueError = queueError || error; }
     await window.courseCapture.recording.finish(recording.courseId);
     state.courseId = recording.courseId;
     setProgress({ courseId: recording.courseId, stage: "transcribe", detail: "影片已保存，正在完成課程結果", progress: 60 });
-    setStatus(queueError ? "錄影已保存，但有一段背景處理失敗；資料庫保留目前內容，可重試。" : "影片已保存，正在完成逐字稿與課程筆記；可到資料庫查看進度。", queueError ? "error" : "success");
+    setStatus(queueError ? "錄影已停止，但有一段背景處理失敗；請到資料庫確認檔案。" : "錄影已停止，正在合併片段並檢查音軌；完成後可到資料庫查看。", queueError ? "error" : "success");
   } catch (error) {
+    await window.courseCapture.recording.finish(recording.courseId).catch(() => {});
     setStatus(`停止錄製時發生問題：${error.message || "請重新開啟應用程式查看草稿"}`, "error");
   } finally {
     state.recording = null;
@@ -497,7 +593,7 @@ function renderModelStatus() {
   if (els.cancelModel) els.cancelModel.hidden = !state.modelPulling;
   if (els.cancelModel) els.cancelModel.textContent = state.modelPulling ? `取消 ${state.modelPulling}` : "取消下載";
   els.model.innerHTML = (modelState.choices || []).map((choice) => `<option value="${escapeHtml(choice.name)}"${choice.name === modelState.selected ? " selected" : ""}>${escapeHtml(choice.label)}</option>`).join("");
-  if (!modelState.choices?.length) els.model.innerHTML = `<option value="qwen3:4b">Qwen 3 · 快速</option><option value="qwen3:8b">Qwen 3 · 高品質</option>`;
+  if (!modelState.choices?.length) els.model.innerHTML = `<option value="qwen3:4b">Qwen 3 · 4B（較快）</option><option value="qwen3:8b">Qwen 3 · 8B（較慢）</option>`;
   els.ollamaBadge.textContent = modelState.available ? "Ollama 已連線" : "需要設定";
   els.ollamaBadge.className = modelState.available ? "ollama-ok" : "ollama-error";
   if (!modelState.available) {
@@ -550,9 +646,7 @@ async function refreshCourses() {
 
 function renderDetailNotes(note) {
   if (!note?.json) return `<div class="empty"><span>✦</span><b>${note?.status === "error" ? "整理失敗" : "尚未產生筆記"}</b><p>${escapeHtml(note?.error || "完成逐字稿後可使用本機 Qwen 整理。")}</p></div>`;
-  const json = note.json;
-  const list = (items) => (items || []).length ? `<ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : `<p class="muted">無資料</p>`;
-  return `<p class="model-label">模型：${escapeHtml(note.model || "本機 Qwen")}</p><h3>課程摘要</h3><p>${escapeHtml(json.summary || "無摘要")}</p><h3>核心重點</h3>${list(json.keyPoints)}<h3>重要名詞／公式／定義</h3>${list(json.termsAndFormulas)}<h3>容易混淆或需複習處</h3>${list(json.confusions)}<h3>課後複習問題</h3>${list(json.reviewQuestions)}<h3>一句話總結</h3><p>${escapeHtml(json.takeaway || "無總結")}</p>`;
+  return `<p class="model-label">模型：${escapeHtml(note.model || "本機 Qwen")}${note.status === "processing" ? " · 正在重新整理，以下為前次筆記" : note.status === "error" ? " · 本次整理失敗，以下為前次筆記" : ""}</p>${renderNoteBody(note.json)}`;
 }
 
 function renderCourseDetail(detail) {
@@ -564,8 +658,11 @@ function renderCourseDetail(detail) {
     ? detail.segments.map((item) => `<button type="button" class="segment" data-start-ms="${Number(item.startMs) || 0}"><time>${formatTime(item.startMs)}</time><span>${escapeHtml(item.text)}</span></button>`).join("")
     : `<div class="list-empty">目前沒有逐字稿片段。</div>`;
   const trash = Boolean(course.deleted_at);
+  const categoryOptions = state.categories.map((item) => `<option value="${escapeHtml(item.id)}"${item.id === course.categoryId ? " selected" : ""}>${escapeHtml(item.name)}</option>`).join("");
+  const categoryEditor = trash ? "" : `<div class="detail-category-editor"><label for="detail-category-select">課程分類</label><select id="detail-category-select" data-detail-category><option value=""${!course.categoryId ? " selected" : ""}>未分類</option>${categoryOptions}<option value="__new__">＋ 新增分類</option></select><input data-detail-new-category-input type="text" maxlength="80" placeholder="輸入新分類名稱" aria-label="新分類名稱" hidden><button type="button" data-detail-category-save>儲存分類</button></div>`;
   els.courseDetail.hidden = false;
-  els.courseDetail.innerHTML = `<div class="detail-header"><div><button type="button" class="quiet-button" data-detail-back>← 返回列表</button><h2>${escapeHtml(course.title)}</h2><small>${escapeHtml(course.categoryName || "未分類")} · ${escapeHtml(course.semester || "未指定")} · ${escapeHtml(mediaText)} · ${STATUS_LABELS[course.status] || course.status}</small></div><div class="detail-actions">${trash ? `<button type="button" data-detail-action="restore">還原</button><button type="button" class="danger" data-detail-action="delete">永久刪除</button>` : `<button type="button" data-detail-action="retry">重新轉錄</button><button type="button" data-detail-action="notes">重新整理筆記</button><button type="button" class="danger" data-detail-action="trash">移到回收桶</button>`}</div></div>${video ? `<div class="media-preview"><video controls preload="metadata" data-detail-video src="${escapeHtml(video.mediaUrl)}"></video></div>` : detail.media.length ? `<div class="audio-note">這門課是錄音檔。依設定不顯示影音預覽，但保留逐字稿時間戳。</div>` : ""}<div class="detail-grid"><section class="detail-section"><h3>完整逐字稿 · ${detail.segments.length} 段</h3><div class="detail-transcript" data-detail-transcript>${segments}</div></section><section class="detail-section"><h3>課程筆記</h3><div class="detail-note">${renderDetailNotes(detail.notes)}</div></section></div>${course.error ? `<div class="retry-box">${escapeHtml(course.error)}<br />可按上方重新轉錄或重新整理筆記。</div>` : ""}`;
+  els.courseDetail.innerHTML = `<div class="detail-header"><div><button type="button" class="quiet-button" data-detail-back>← 返回列表</button><h2>${escapeHtml(course.title)}</h2><small>${escapeHtml(course.categoryName || "未分類")} · ${escapeHtml(course.semester || "未指定")} · ${escapeHtml(mediaText)} · ${STATUS_LABELS[course.status] || course.status}</small></div><div class="detail-actions">${trash ? `<button type="button" data-detail-action="restore">還原</button><button type="button" class="danger" data-detail-action="delete">永久刪除</button>` : `<button type="button" data-detail-action="retry">重新轉錄</button><button type="button" data-detail-action="notes">重新整理筆記</button><button type="button" class="danger" data-detail-action="trash">移到回收桶</button>`}</div></div>${categoryEditor}<div class="detail-ai-progress" data-detail-ai-progress hidden><b>Ollama 筆記整理進度</b><span data-detail-ai-copy></span><div class="progress-track"><i data-detail-ai-bar></i></div><small data-detail-ai-eta></small></div>${video ? `<div class="media-preview"><video controls preload="metadata" data-detail-video src="${escapeHtml(video.mediaUrl)}"></video></div>` : detail.media.length ? `<div class="audio-note">這門課是錄音檔。依設定不顯示影音預覽，但保留逐字稿時間戳。</div>` : ""}<div class="detail-grid"><section class="detail-section"><h3>完整逐字稿 · ${detail.segments.length} 段</h3><div class="detail-transcript" data-detail-transcript>${segments}</div></section><section class="detail-section"><h3>課程筆記</h3><div class="detail-note">${renderDetailNotes(detail.notes)}</div></section></div>${course.error ? `<div class="retry-box">${escapeHtml(course.error)}<br />可按上方重新轉錄或重新整理筆記。</div>` : ""}`;
+  renderDetailProgress(course.id);
   const player = $(`[data-detail-video]`, els.courseDetail);
   if (player) {
     player.addEventListener("timeupdate", () => {
@@ -575,10 +672,46 @@ function renderCourseDetail(detail) {
   }
 }
 
+function renderDetailProgress(courseId) {
+  const panel = $(`[data-detail-ai-progress]`, els.courseDetail);
+  if (!panel) return;
+  const data = state.notesProgress.get(courseId);
+  panel.hidden = !data || data.stage !== "notes";
+  if (panel.hidden) return;
+  $(`[data-detail-ai-copy]`, panel).textContent = `${data.detail || "正在整理"} · ${Number(data.progress) || 0}%`;
+  $(`[data-detail-ai-bar]`, panel).style.width = `${Math.max(0, Math.min(100, Number(data.progress) || 0))}%`;
+  $(`[data-detail-ai-eta]`, panel).textContent = `本機 ${data.model || "Ollama"} · 預估剩餘時間：${formatEta(data.etaSeconds)}`;
+}
+
 async function openCourse(courseId) {
   state.selectedCourseId = courseId;
   try { state.lastDetail = await window.courseCapture.courses.get(courseId); renderCourseDetail(state.lastDetail); await refreshCourses(); setDatabaseMessage("點擊逐字稿時間戳可跳到影片片段。"); }
   catch (error) { setDatabaseMessage(error.message || "無法開啟課程"); }
+}
+
+async function saveDetailCategory() {
+  const id = state.selectedCourseId;
+  const select = $(`[data-detail-category]`, els.courseDetail);
+  if (!id || !select) return;
+  const button = $(`[data-detail-category-save]`, els.courseDetail);
+  button.disabled = true;
+  try {
+    let categoryId = select.value || null;
+    if (categoryId === "__new__") {
+      const name = $(`[data-detail-new-category-input]`, els.courseDetail).value.trim();
+      if (!name) throw new Error("請輸入新分類名稱。");
+      const created = await window.courseCapture.categories.create(name);
+      categoryId = created.id;
+      state.categories = await window.courseCapture.categories.list();
+      renderFilters();
+    }
+    await window.courseCapture.courses.setCategory(id, categoryId);
+    if (els.dbCategory.value !== "all" && els.dbCategory.value !== categoryId) els.dbCategory.value = "all";
+    await openCourse(id);
+    setDatabaseMessage(`已儲存課程分類：${state.categories.find((item) => item.id === categoryId)?.name || "未分類"}。`);
+  } catch (error) {
+    setDatabaseMessage(error.message || "無法儲存分類");
+  } finally { button.disabled = false; }
 }
 
 async function handleDetailAction(action) {
@@ -625,13 +758,23 @@ $(`[data-toggle-trash]`).addEventListener("click", (event) => { state.trashMode 
 });
 els.courseList.addEventListener("click", (event) => { const card = event.target.closest("[data-course-id]"); if (card) openCourse(card.dataset.courseId); });
 els.courseDetail.addEventListener("click", (event) => {
+  if (event.target.closest("[data-detail-category-save]")) { saveDetailCategory(); return; }
   const segment = event.target.closest("[data-start-ms]");
   if (segment) { const player = $(`[data-detail-video]`, els.courseDetail); if (player) { player.currentTime = Number(segment.dataset.startMs) / 1000; player.play().catch(() => {}); } return; }
   const button = event.target.closest("[data-detail-back], [data-detail-action]");
   if (button) handleDetailAction(button.dataset.detailAction || "back");
 });
+els.courseDetail.addEventListener("change", (event) => {
+  if (!event.target.matches("[data-detail-category]")) return;
+  const input = $(`[data-detail-new-category-input]`, els.courseDetail);
+  input.hidden = event.target.value !== "__new__";
+  if (!input.hidden) input.focus();
+});
 
 window.courseCapture.onProgress((data) => {
+  if (data?.courseId && data.stage === "notes") state.notesProgress.set(data.courseId, data);
+  if (data?.courseId && (data.stage === "complete" || data.stage === "error" || (data.stage === "notes" && data.progress === 100))) state.notesProgress.delete(data.courseId);
+  if (data?.courseId === state.selectedCourseId) renderDetailProgress(data.courseId);
   if (data?.courseId && data.courseId !== state.courseId && data.courseId !== state.selectedCourseId) return;
   setProgress(data);
   if (data?.courseId && (data.stage === "complete" || data.stage === "error")) {
@@ -660,6 +803,8 @@ async function initialize() {
     renderFilters();
     await Promise.all([refreshSources(), refreshModels(), refreshCourses()]);
     const info = await window.courseCapture.app.info();
+    const versionLabel = document.querySelector("[data-app-version]");
+    if (versionLabel) versionLabel.textContent = info.version;
     setStatus(`CourseScribe ${info.version} 已準備完成。選擇來源後即可開始。`);
   } catch (error) { setStatus(`初始化失敗：${error.message || "請重新開啟應用程式"}`, "error"); }
 }

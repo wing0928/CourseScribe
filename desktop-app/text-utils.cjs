@@ -26,10 +26,17 @@ function normalizeNotes(note, language = "zh-TW") {
   const clone = JSON.parse(JSON.stringify(note));
   const fields = ["summary", "takeaway"];
   for (const key of fields) if (clone[key]) clone[key] = toTraditionalTaiwan(clone[key], language);
-  for (const key of ["keyPoints", "termsAndFormulas", "confusions", "reviewQuestions"]) {
+  for (const key of ["confusions", "reviewQuestions"]) {
     if (!Array.isArray(clone[key])) continue;
     clone[key] = clone[key].map((item) => typeof item === "string" ? toTraditionalTaiwan(item, language) : item);
   }
+  if (Array.isArray(clone.sections)) clone.sections = clone.sections.map((section) => ({
+    ...section,
+    title: toTraditionalTaiwan(section.title, language),
+    points: Array.isArray(section.points) ? section.points.map((point) => typeof point === "string"
+      ? toTraditionalTaiwan(point, language)
+      : { ...point, text: toTraditionalTaiwan(point.text, language), quote: toTraditionalTaiwan(point.quote, language) }) : [],
+  }));
   return clone;
 }
 
