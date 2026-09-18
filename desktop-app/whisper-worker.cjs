@@ -2,8 +2,17 @@ const { parentPort, workerData } = require("node:worker_threads");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const os = require("node:os");
-const { WaveFile } = require("wavefile");
-const { transcodeMediaToWav } = require("./media-utils.cjs");
+const { pathToFileURL } = require("node:url");
+const { createRequire } = require("node:module");
+
+// In a packaged Electron app this worker entry point is deliberately unpacked
+// so Node can execute it.  Its dependencies remain safely in app.asar, so use
+// a require rooted at the archived package instead of resolving from the
+// unpacked directory.
+const appRoot = String(workerData?.appRoot || __dirname);
+const requireFromApp = createRequire(path.join(appRoot, "package.json"));
+const { WaveFile } = requireFromApp("wavefile");
+const { transcodeMediaToWav } = requireFromApp("./media-utils.cjs");
 
 function languageName(code) {
   return { "zh-TW": "chinese", "zh-CN": "chinese", "en-US": "english", "ja-JP": "japanese" }[code] || "chinese";
@@ -29,7 +38,8 @@ async function run() {
     const audio = loadWavSamples(await fs.readFile(wavPath));
     if (!audio.length) throw new Error("這個檔案沒有可用的音訊內容。");
     send("stage", { detail: "正在載入背景 Whisper 模型", progress: 4 });
-    const { pipeline, env } = await import("@huggingface/transformers");
+    const transformersPath = requireFromApp.resolve("@huggingface/transformers");
+    const { pipeline, env } = await import(pathToFileURL(transformersPath).href);
     env.cacheDir = workerData.modelCacheDir;
     const transcriber = await pipeline("automatic-speech-recognition", "onnx-community/whisper-small", { dtype: "q4", device: "cpu" });
     const durationMs = Math.round(audio.length / 16000 * 1000);

@@ -401,6 +401,7 @@ if (!gotSingleInstanceLock) {
       const workerPath = fsSync.existsSync(unpackedWorker) ? unpackedWorker : workerSource;
       const worker = new Worker(workerPath, { workerData: {
         mediaPath: media.file_path, language, ffmpegPath,
+        appRoot: __dirname,
         modelCacheDir: path.join(app.getPath("userData"), "whisper-models"),
       } });
       let settled = false;
