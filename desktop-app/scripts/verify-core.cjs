@@ -47,7 +47,10 @@ try {
   const pending = reopened.createCourse({ title: "中斷轉錄測試", status: "transcribing" });
   const pendingMedia = reopened.upsertMedia({ courseId: pending.id, filePath: path.join(root, "pending.m4a"), originalName: "pending.m4a", mediaType: "audio", extension: "m4a", size: 12, processingStatus: "ready" });
   const pendingJob = reopened.createJob(pending.id, "transcription");
-  reopened.updateJob(pendingJob.id, { status: "running" });
+  reopened.updateJob(pendingJob.id, { status: "running", progress: 42, detail: "已完成第 42/110 段" });
+  const pendingDetail = reopened.getCourseDetail(pending.id);
+  assert.equal(pendingDetail.jobs[0].progress, 42, "單一課程詳情應包含持久化的轉錄進度");
+  assert.equal(pendingDetail.jobs[0].detail, "已完成第 42/110 段", "單一課程詳情應包含目前轉錄階段");
   assert.equal(reopened.getMostRecentInterruptedTranscription().media_id, pendingMedia.id, "最近中斷的轉錄應可在下次啟動恢復");
   reopened.abandonRunningTranscriptionJobs(pending.id);
   assert.equal(reopened.getJob(pendingJob.id).status, "interrupted", "舊工作須明確標示已被恢復流程取代");

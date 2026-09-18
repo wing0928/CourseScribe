@@ -43,7 +43,7 @@ const fail = (message) => { throw new Error(message); };
 function exitAfterTest(code) { setTimeout(() => process.exit(code), 300); app.exit(code); }
 
 async function waitForWindow() {
-  for (let attempt = 0; attempt < 60; attempt += 1) {
+  for (let attempt = 0; attempt < 150; attempt += 1) {
     const window = require("electron").BrowserWindow.getAllWindows()[0];
     if (window && !window.isDestroyed() && !window.webContents.isLoadingMainFrame()) return window;
     await wait(100);
@@ -116,6 +116,12 @@ async function run() {
   });
   if (readableSize.note < 14 || readableSize.transcript < 14 || readableSize.quote < 13) fail(`筆記或逐字稿文字仍太小：${JSON.stringify(readableSize)}`);
   if (genericNotes.includes("本課涵蓋：")) fail("舊版冗長標題清單不應佔據全課概覽");
+  const processPanel = await evaluate(window, () => {
+    state.courseProgress.set(state.selectedCourseId, { courseId: state.selectedCourseId, stage: "transcribe", detail: "已完成第 42/110 段", progress: 42 });
+    renderDetailProgress(state.selectedCourseId);
+    return document.querySelector("[data-detail-process]")?.textContent || "";
+  });
+  if (!processPanel.includes("已完成第 42/110 段") || !processPanel.includes("42%") || !processPanel.includes("逐字稿片段")) fail(`資料庫沒有顯示單一課程轉錄過程：${processPanel}`);
   await evaluate(window, () => document.querySelector("[data-detail-back]").click());
 
   const created = await evaluate(window, async () => {

@@ -71,6 +71,8 @@ const state = {
   modelPulling: "",
   recording: null,
   notesProgress: new Map(),
+  courseProgress: new Map(),
+  detailProcessRefreshRunning: false,
   detailTranscriptLanguage: "original",
 };
 
@@ -718,6 +720,43 @@ function renderDetailNotes(note) {
   return `<p class="model-label">模型：${escapeHtml(note.model || "本機 AI")}${note.status === "processing" ? " · 正在重新整理，以下為前次筆記" : note.status === "error" ? " · 本次整理失敗，以下為前次筆記" : ""}</p>${renderNoteBody(note.json)}`;
 }
 
+function jobTypeLabel(type) {
+  if (String(type || "").startsWith("transcription")) return "逐字稿轉錄";
+  if (type === "translation") return "英文翻譯";
+  if (type === "notes") return "課程筆記";
+  return String(type || "處理工作");
+}
+
+function jobStatusLabel(status) {
+  return ({ queued: "排隊中", running: "處理中", completed: "已完成", interrupted: "已中斷", failed: "失敗" })[status] || String(status || "處理中");
+}
+
+function stageForJob(job) {
+  if (String(job?.type || "").startsWith("transcription")) return Number(job?.progress) <= 4 ? "audio" : "transcribe";
+  if (job?.type === "translation") return "translate";
+  return "notes";
+}
+
+function latestProcessSnapshot(detail) {
+  const live = state.courseProgress.get(detail.course.id);
+  if (live) return live;
+  const job = (detail.jobs || []).find((item) => ["queued", "running"].includes(item.status));
+  if (!job) return null;
+  return { courseId: detail.course.id, stage: stageForJob(job), detail: job.detail || jobTypeLabel(job.type), progress: job.progress, persisted: true, updatedAt: job.updatedAt };
+}
+
+function renderProcessHistory(detail) {
+  const snapshot = latestProcessSnapshot(detail);
+  const active = snapshot || (["recording", "transcribing", "summarizing"].includes(detail.course.status) ? { stage: detail.course.status === "recording" ? "recording" : detail.course.status === "summarizing" ? "notes" : "transcribe", detail: STATUS_LABELS[detail.course.status], progress: null } : null);
+  if (!active && !(detail.jobs || []).length) return "";
+  const safeProgress = Number.isFinite(Number(active?.progress)) ? Math.max(0, Math.min(100, Math.round(Number(active.progress)))) : null;
+  const segmentCount = detail.segments?.length || 0;
+  const currentStep = String(active?.detail || "正在處理課程");
+  const time = active?.updatedAt ? new Date(active.updatedAt).toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "剛剛";
+  const history = (detail.jobs || []).slice(0, 4).map((job) => `<li class="process-history-item ${escapeHtml(job.status)}"><span>${escapeHtml(jobTypeLabel(job.type))}</span><b>${escapeHtml(jobStatusLabel(job.status))}</b><small>${escapeHtml(job.detail || job.error || "尚未回報細節")}${Number.isFinite(Number(job.progress)) ? ` · ${Math.round(Number(job.progress))}%` : ""}</small></li>`).join("");
+  return `<section class="detail-process" data-detail-process aria-live="polite"><div class="detail-process-top"><div><p class="eyebrow">LIVE TRANSCRIPTION</p><h3>${escapeHtml(STAGE_LABELS[active?.stage] || "處理中")}</h3></div><strong>${safeProgress == null ? "處理中" : `${safeProgress}%`}</strong></div><p class="detail-process-copy">${escapeHtml(currentStep)}</p><div class="progress-track"><i style="width:${safeProgress == null ? 8 : safeProgress}%"></i></div><div class="detail-process-meta"><span>已寫入 <b>${segmentCount}</b> 個逐字稿片段</span><span>最後更新 ${escapeHtml(time)}</span></div>${history ? `<details class="process-history" open><summary>查看處理紀錄</summary><ul>${history}</ul></details>` : ""}</section>`;
+}
+
 function renderCourseDetail(detail) {
   if (!detail) { els.courseDetail.hidden = true; return; }
   const course = detail.course;
@@ -735,7 +774,7 @@ function renderCourseDetail(detail) {
   const modelOptions = (state.models.choices || []).map((item) => `<option value="${escapeHtml(item.name)}"${item.name === course.model ? " selected" : ""}>${escapeHtml(item.label)}</option>`).join("");
   const courseEditor = trash ? "" : `<details class="course-editor"><summary>編輯這堂課的資訊</summary><div class="course-edit-grid"><label>課程名稱<input data-detail-title value="${escapeHtml(course.title)}" maxlength="200"></label><label>分類<select data-detail-category><option value=""${!course.categoryId ? " selected" : ""}>未分類</option>${categoryOptions}<option value="__new__">＋ 新增分類</option></select><input data-detail-new-category-input hidden placeholder="新增分類名稱" maxlength="80"></label><label>學期<select data-detail-semester><option value=""${!course.semester ? " selected" : ""}>未指定</option>${semesterOptions}<option value="__new__">＋ 新增學期</option></select><input data-detail-new-semester-input hidden placeholder="新增學期，例如 114-1" maxlength="40"></label><label>逐字稿語言<select data-detail-language><option value="zh-TW"${course.language === "zh-TW" ? " selected" : ""}>繁體中文（臺灣）</option><option value="zh-CN"${course.language === "zh-CN" ? " selected" : ""}>簡體中文</option><option value="en-US"${course.language === "en-US" ? " selected" : ""}>English</option><option value="ja-JP"${course.language === "ja-JP" ? " selected" : ""}>日本語</option></select></label><label>筆記模型<select data-detail-model>${modelOptions}</select></label></div><button type="button" data-detail-save>儲存全部資訊</button></details>`;
   els.courseDetail.hidden = false;
-  els.courseDetail.innerHTML = `<div class="detail-header"><div><button type="button" class="quiet-button" data-detail-back>← 返回列表</button><h2>${escapeHtml(course.title)}</h2><small>${escapeHtml(course.categoryName || "未分類")} · ${escapeHtml(course.semester || "未指定")} · ${escapeHtml(mediaText)} · ${STATUS_LABELS[course.status] || course.status}</small></div><div class="detail-actions">${trash ? `<button type="button" data-detail-action="restore">還原</button><button type="button" class="danger" data-detail-action="delete">永久刪除</button>` : `<button type="button" data-detail-action="retry">重新轉錄</button><button type="button" data-detail-action="notes">重新整理筆記</button><button type="button" class="danger" data-detail-action="trash">移到回收桶</button>`}</div></div>${courseEditor}<div class="detail-ai-progress" data-detail-ai-progress hidden><b>本機處理進度</b><span data-detail-ai-copy></span><div class="progress-track"><i data-detail-ai-bar></i></div><small data-detail-ai-eta></small></div>${video ? `<div class="media-preview"><video controls preload="metadata" data-detail-video src="${escapeHtml(video.mediaUrl)}"></video></div>` : detail.media.length ? `<div class="audio-note">這門課是錄音檔。依設定不顯示影音預覽，但保留逐字稿時間戳。</div>` : ""}<div class="detail-grid"><section class="detail-section"><div class="detail-section-head"><h3>完整逐字稿 · ${detail.segments.length} 段</h3><div class="transcript-tools"><button type="button" data-detail-translate ${translations.size === detail.segments.length ? "disabled" : ""}>翻譯成英文</button><button type="button" data-detail-language-view="original" class="${!english ? "selected" : ""}">原文</button><button type="button" data-detail-language-view="en" class="${english ? "selected" : ""}" ${translations.size ? "" : "disabled"}>English</button></div></div><div class="detail-transcript" data-detail-transcript>${segments}</div></section><section class="detail-section"><h3>課程筆記</h3><div class="detail-note">${renderDetailNotes(detail.notes)}</div></section></div>${course.error ? `<div class="retry-box">${escapeHtml(course.error)}<br />可按上方重新轉錄或重新整理筆記。</div>` : ""}`;
+  els.courseDetail.innerHTML = `<div class="detail-header"><div><button type="button" class="quiet-button" data-detail-back>← 返回列表</button><h2>${escapeHtml(course.title)}</h2><small>${escapeHtml(course.categoryName || "未分類")} · ${escapeHtml(course.semester || "未指定")} · ${escapeHtml(mediaText)} · ${STATUS_LABELS[course.status] || course.status}</small></div><div class="detail-actions">${trash ? `<button type="button" data-detail-action="restore">還原</button><button type="button" class="danger" data-detail-action="delete">永久刪除</button>` : `<button type="button" data-detail-action="retry">重新轉錄</button><button type="button" data-detail-action="notes">重新整理筆記</button><button type="button" class="danger" data-detail-action="trash">移到回收桶</button>`}</div></div>${courseEditor}<div data-detail-process-host>${renderProcessHistory(detail)}</div>${video ? `<div class="media-preview"><video controls preload="metadata" data-detail-video src="${escapeHtml(video.mediaUrl)}"></video></div>` : detail.media.length ? `<div class="audio-note">這門課是錄音檔。依設定不顯示影音預覽，但保留逐字稿時間戳。</div>` : ""}<div class="detail-grid"><section class="detail-section"><div class="detail-section-head"><h3>完整逐字稿 · ${detail.segments.length} 段</h3><div class="transcript-tools"><button type="button" data-detail-translate ${translations.size === detail.segments.length ? "disabled" : ""}>翻譯成英文</button><button type="button" data-detail-language-view="original" class="${!english ? "selected" : ""}">原文</button><button type="button" data-detail-language-view="en" class="${english ? "selected" : ""}" ${translations.size ? "" : "disabled"}>English</button></div></div><div class="detail-transcript" data-detail-transcript>${segments}</div></section><section class="detail-section"><h3>課程筆記</h3><div class="detail-note">${renderDetailNotes(detail.notes)}</div></section></div>${course.error ? `<div class="retry-box">${escapeHtml(course.error)}<br />可按上方重新轉錄或重新整理筆記。</div>` : ""}`;
   renderDetailProgress(course.id);
   const player = $(`[data-detail-video]`, els.courseDetail);
   if (player) {
@@ -752,14 +791,9 @@ function renderCourseDetail(detail) {
 }
 
 function renderDetailProgress(courseId) {
-  const panel = $(`[data-detail-ai-progress]`, els.courseDetail);
-  if (!panel) return;
-  const data = state.notesProgress.get(courseId);
-  panel.hidden = !data || !["notes", "translate"].includes(data.stage);
-  if (panel.hidden) return;
-  $(`[data-detail-ai-copy]`, panel).textContent = `${data.detail || "正在整理"} · ${Number(data.progress) || 0}%`;
-  $(`[data-detail-ai-bar]`, panel).style.width = `${Math.max(0, Math.min(100, Number(data.progress) || 0))}%`;
-  $(`[data-detail-ai-eta]`, panel).textContent = data.stage === "notes" ? `本機 ${data.model || "Ollama"} · 預估剩餘時間：${formatEta(data.etaSeconds)}` : `本機 ${data.model || "Ollama"} · 不會修改原始逐字稿`;
+  if (courseId !== state.selectedCourseId || !state.lastDetail) return;
+  const host = $(`[data-detail-process-host]`, els.courseDetail);
+  if (host) host.innerHTML = renderProcessHistory(state.lastDetail);
 }
 
 async function openCourse(courseId) {
@@ -913,8 +947,9 @@ els.courseDetail.addEventListener("change", (event) => {
 });
 
 window.courseCapture.onProgress((data) => {
+  if (data?.courseId) state.courseProgress.set(data.courseId, data);
   if (data?.courseId && (data.stage === "notes" || data.stage === "translate")) state.notesProgress.set(data.courseId, data);
-  if (data?.courseId && (data.stage === "complete" || data.stage === "error" || ((data.stage === "notes" || data.stage === "translate") && data.progress === 100))) state.notesProgress.delete(data.courseId);
+  if (data?.courseId && (data.stage === "complete" || data.stage === "error" || ((data.stage === "notes" || data.stage === "translate") && data.progress === 100))) { state.notesProgress.delete(data.courseId); state.courseProgress.delete(data.courseId); }
   if (data?.courseId === state.selectedCourseId) renderDetailProgress(data.courseId);
   if (data?.courseId && data.courseId !== state.courseId && data.courseId !== state.selectedCourseId) return;
   setProgress(data);

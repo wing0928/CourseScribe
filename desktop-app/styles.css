@@ -170,6 +170,22 @@ input:focus, select:focus { border-color: var(--teal); box-shadow: 0 0 0 2px rgb
 .detail-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .detail-actions button, .course-editor button, .transcript-tools button { min-height: 32px; border: 1px solid #3b6076; border-radius: 7px; background: #102b40; color: #9ddfd9; font-size: 12px; }
 .detail-actions button.danger { border-color: #69404d; color: #ffadb5; }
+.detail-process { margin-top: 14px; padding: 14px 15px; border: 1px solid #27616f; border-radius: 11px; background: linear-gradient(115deg, rgba(14, 57, 69, .8), rgba(11, 31, 50, .78)); }
+.detail-process-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.detail-process-top .eyebrow { margin: 0 0 4px; }
+.detail-process-top h3 { margin: 0; color: #d7faf7; font-size: 17px; }
+.detail-process-top > strong { color: #80ebe2; font-size: 25px; font-variant-numeric: tabular-nums; }
+.detail-process-copy { margin: 9px 0 8px; color: #d1e3ee; font-size: 14px; }
+.detail-process-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 18px; margin-top: 9px; color: #9ab3c9; font-size: 12px; }
+.detail-process-meta b { color: #d8f8f3; }
+.process-history { margin-top: 12px; border-top: 1px solid rgba(105, 176, 188, .3); padding-top: 9px; }
+.process-history summary { cursor: pointer; color: #a8d9e2; font-size: 12px; }
+.process-history ul { display: grid; gap: 5px; margin: 8px 0 0; padding: 0; list-style: none; }
+.process-history-item { display: grid; grid-template-columns: minmax(100px, .8fr) 66px minmax(0, 2fr); gap: 9px; align-items: baseline; color: #b4c9d9; font-size: 12px; }
+.process-history-item b { color: #a7f0e3; font-weight: 600; }
+.process-history-item.failed b { color: #ffadb5; }
+.process-history-item.interrupted b { color: #efc77f; }
+.process-history-item small { overflow: hidden; color: #8da7bd; text-overflow: ellipsis; white-space: nowrap; }
 .media-preview { margin: 15px 0; border: 1px solid #29445e; border-radius: 10px; overflow: hidden; background: #050d16; }
 .media-preview video { display: block; width: 100%; max-height: 300px; background: #000; }
 .audio-note { margin: 15px 0; padding: 10px 12px; border-radius: 8px; background: #0d2433; color: #8ea8bd; font-size: 10px; }

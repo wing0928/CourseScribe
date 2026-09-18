@@ -537,6 +537,15 @@ class CourseDatabase {
 
   getJob(id) { return this.get("SELECT * FROM jobs WHERE id=?", normalizeId(id)); }
 
+  listJobs(courseId, limit = 8) {
+    const safeLimit = Math.max(1, Math.min(30, Number(limit) || 8));
+    return this.all(
+      `SELECT id,type,status,progress,detail,error,created_at,updated_at
+       FROM jobs WHERE course_id=? ORDER BY updated_at DESC, created_at DESC LIMIT ?`,
+      normalizeId(courseId), safeLimit,
+    );
+  }
+
   setSetting(key, value) {
     this.run("INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", String(key), value == null ? null : String(value), now());
     return this.getSetting(key);
@@ -550,7 +559,7 @@ class CourseDatabase {
   getCourseDetail(courseId) {
     const course = this.getCourse(courseId);
     if (!course) return null;
-    return { course, media: this.listMedia(courseId, true), segments: this.listSegments(courseId), notes: this.getNotes(courseId), terms: this.listTerms(courseId), translations: this.listTranslations(courseId), annotations: this.listAnnotations(courseId) };
+    return { course, media: this.listMedia(courseId, true), segments: this.listSegments(courseId), notes: this.getNotes(courseId), terms: this.listTerms(courseId), translations: this.listTranslations(courseId), annotations: this.listAnnotations(courseId), jobs: this.listJobs(courseId) };
   }
 
   trashCourse(courseId) {

@@ -133,6 +133,16 @@ if (!gotSingleInstanceLock) {
       terms: detail.terms || [],
       translations: detail.translations || [],
       annotations: detail.annotations || [],
+      jobs: (detail.jobs || []).map((job) => ({
+        id: job.id,
+        type: job.type,
+        status: job.status,
+        progress: Number(job.progress) || 0,
+        detail: job.detail || null,
+        error: job.error || null,
+        createdAt: job.created_at,
+        updatedAt: job.updated_at,
+      })),
     };
   }
 
@@ -154,6 +164,10 @@ if (!gotSingleInstanceLock) {
   }
 
   function emitUpdated(courseId, reason = "updated") { send("course:updated", { courseId, reason }); }
+
+  function activeTranscriptionJob(courseId) {
+    return [...activeJobs.entries()].find(([, activeCourseId]) => activeCourseId === courseId)?.[0] || null;
+  }
 
   function emitModelProgress(model, data) {
     const completed = Number(data?.completed);
@@ -415,9 +429,18 @@ if (!gotSingleInstanceLock) {
         modelCacheDir: path.join(app.getPath("userData"), "whisper-models"),
       } });
       let settled = false;
+      let lastWorkerMessageAt = Date.now();
+      // Keep already persisted segments on automatic recovery.  A recovered
+      // worker starts from the beginning, so de-duplicate its repeated output
+      // instead of deleting the user's partial transcript.
+      const knownSegments = new Set(courseDb.listSegments(courseId).map((segment) => `${Math.round(Number(segment.start_ms) / 100)}:${String(segment.text || "").trim()}`));
+      const watchdog = setInterval(() => {
+        if (!settled && Date.now() - lastWorkerMessageAt > 180000) finish(new Error("Whisper 模型超過 3 分鐘沒有回報進度，已停止這次工作。請確認本機模型完整後重新轉錄。"));
+      }, 15000);
       const finish = (error = null) => {
         if (settled) return;
         settled = true;
+        clearInterval(watchdog);
         worker.terminate().catch(() => {});
         if (error) reject(error);
         else {
@@ -431,12 +454,19 @@ if (!gotSingleInstanceLock) {
         }
       };
       worker.on("message", (message) => {
+        lastWorkerMessageAt = Date.now();
         if (message.type === "stage") {
           courseDb.updateJob(jobId, { status: "running", detail: message.detail, progress: Number(message.progress) || 1 });
           emitProgress(courseId, "audio", message.detail, message.progress);
         } else if (message.type === "segments") {
           const recognized = (message.segments || []).map((segment) => ({ ...segment, text: normalizeWhisperText(segment.text, languageName(language), language) }));
-          courseDb.addSegments(courseId, mediaId, recognized, language);
+          const newSegments = recognized.filter((segment) => {
+            const key = `${Math.round(Number(segment.startMs) / 100)}:${String(segment.text || "").trim()}`;
+            if (knownSegments.has(key)) return false;
+            knownSegments.add(key);
+            return true;
+          });
+          if (newSegments.length) courseDb.addSegments(courseId, mediaId, newSegments, language);
           courseDb.updateJob(jobId, { status: "running", detail: `已完成第 ${message.chunkIndex}/${message.total} 段`, progress: message.progress });
           emitProgress(courseId, "transcribe", `正在轉錄第 ${message.chunkIndex}/${message.total} 段`, message.progress);
           emitUpdated(courseId, "transcript");
@@ -797,7 +827,6 @@ if (!gotSingleInstanceLock) {
     const pending = courseDb.getMostRecentInterruptedTranscription();
     if (!pending) return;
     courseDb.abandonRunningTranscriptionJobs(pending.course_id);
-    courseDb.clearSegments(pending.course_id);
     const job = courseDb.createJob(pending.course_id, "transcription-resume");
     activeJobs.set(job.id, pending.course_id);
     startupLog(`恢復中斷轉錄：${pending.title}`);
@@ -931,6 +960,8 @@ if (!gotSingleInstanceLock) {
     ipcMain.handle("media:choose", chooseMediaFile);
     ipcMain.handle("transcription:start", (_event, { courseId, mediaId, language }) => {
       const id = validateCourseId(courseId);
+      const active = activeTranscriptionJob(id);
+      if (active) return { jobId: active, reused: true };
       const job = courseDb.createJob(id, "transcription");
       activeJobs.set(job.id, id);
       void runImportedPipeline(id, String(mediaId || ""), String(language || "zh-TW"), job.id);
@@ -938,6 +969,8 @@ if (!gotSingleInstanceLock) {
     });
     ipcMain.handle("transcription:retry", (_event, { courseId }) => {
       const id = validateCourseId(courseId);
+      const active = activeTranscriptionJob(id);
+      if (active) return { jobId: active, reused: true };
       const detail = courseDb.getCourseDetail(id);
       const media = detail?.media.find((item) => item.processing_status !== "recording") || detail?.media[0];
       if (!media) throw new Error("找不到可重新轉錄的媒體");
