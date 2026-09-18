@@ -65,12 +65,16 @@ server.listen(0, "127.0.0.1", async () => {
     assert.equal(generateRequests.at(-1).system, guide, "Markdown 規範必須實際傳給 Ollama");
     assert.equal(generateRequests.at(-1).think, false);
     assert.equal(generateRequests.at(-1).options.num_predict, 1100);
+    assert.equal(generateRequests.at(-1).options.num_ctx, 8192, "筆記 JSON 需要保留足夠的輸出上下文");
+    assert.equal(generateRequests.at(-1).format.properties.sections.maxItems, 2, "分段主題必須受 schema 約束以免 JSON 截斷");
     assert.equal(updates.at(-1).evalCount, 123);
     assert.equal(first.value.sections.length, 2);
     const verified = verifyMapEvidence(first.value, chunks.join("\n"));
     assert.equal(verified.sections[0].points[0].status, "source_matched");
     assert.equal(verified.sections[0].points[0].timestamp, "00:00");
     assert.equal(verified.sections[1].points[0].status, "source_matched");
+    const punctuationVariant = verifyMapEvidence({ sections: [{ title: "標點", timestamp: "00:00", points: [{ text: "測試", quote: "第一個概念，的條件" }] }], uncertainties: [] }, chunks.join("\n"));
+    assert.equal(punctuationVariant.sections[0].points[0].status, "source_matched", "全半形標點差異不可誤標待核");
     const falseQuote = verifyMapEvidence({ sections: [{ title: "未佐證", timestamp: "99:99", points: [{ text: "模型捏造的內容", quote: "逐字稿根本沒說這件事" }] }], uncertainties: [] }, chunks.join("\n"));
     assert.equal(falseQuote.sections[0].points[0].status, "needs_review");
     assert.equal(falseQuote.sections[0].points[0].timestamp, "");

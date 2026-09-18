@@ -65,6 +65,8 @@ const state = {
   trashMode: false,
   lastDetail: null,
   homeReviewTab: "summary",
+  homeTranscriptLimit: 160,
+  detailTranscriptLimit: 160,
   models: { available: false, models: [], choices: [], selected: "qwen3:4b" },
   modelPulling: "",
   recording: null,
@@ -315,8 +317,12 @@ function setHomeReviewTab(tab) {
 }
 
 function renderHomeTranscript(segments = []) {
+  const visible = segments.slice(0, state.homeTranscriptLimit);
+  const more = segments.length > visible.length
+    ? `<button type="button" class="quiet-button transcript-more" data-home-transcript-more>載入更多逐字稿（尚餘 ${segments.length - visible.length} 段）</button>`
+    : "";
   els.homeTranscript.innerHTML = segments.length
-    ? segments.map((item) => `<div class="home-transcript-line"><time>${formatTime(item.startMs)}</time><span>${escapeHtml(item.text)}</span></div>`).join("")
+    ? `${visible.map((item) => `<div class="home-transcript-line"><time>${formatTime(item.startMs)}</time><span>${escapeHtml(item.text)}</span></div>`).join("")}${more}`
     : `<p class="muted">尚未產生逐字稿；錄影與轉錄完成後會顯示在這裡。</p>`;
 }
 
@@ -688,8 +694,9 @@ function renderCourseDetail(detail) {
   const course = detail.course;
   const video = detail.media.find((item) => item.mediaType === "video" && item.mediaUrl);
   const mediaText = detail.media.map((item) => `${item.mediaType === "video" ? "影片" : "錄音"} · ${formatBytes(item.size)}`).join("／") || "尚無媒體";
+  const visibleSegments = detail.segments.slice(0, state.detailTranscriptLimit);
   const segments = detail.segments.length
-    ? detail.segments.map((item) => `<button type="button" class="segment" data-start-ms="${Number(item.startMs) || 0}"><time>${formatTime(item.startMs)}</time><span>${escapeHtml(item.text)}</span></button>`).join("")
+    ? `${visibleSegments.map((item) => `<button type="button" class="segment" data-start-ms="${Number(item.startMs) || 0}"><time>${formatTime(item.startMs)}</time><span>${escapeHtml(item.text)}</span></button>`).join("")}${detail.segments.length > visibleSegments.length ? `<button type="button" class="quiet-button transcript-more" data-detail-transcript-more>載入更多逐字稿（尚餘 ${detail.segments.length - visibleSegments.length} 段）</button>` : ""}`
     : `<div class="list-empty">目前沒有逐字稿片段。</div>`;
   const trash = Boolean(course.deleted_at);
   const categoryOptions = state.categories.map((item) => `<option value="${escapeHtml(item.id)}"${item.id === course.categoryId ? " selected" : ""}>${escapeHtml(item.name)}</option>`).join("");
@@ -699,9 +706,14 @@ function renderCourseDetail(detail) {
   renderDetailProgress(course.id);
   const player = $(`[data-detail-video]`, els.courseDetail);
   if (player) {
+    let activeSegment = null;
     player.addEventListener("timeupdate", () => {
       const current = player.currentTime * 1000;
-      $$(".segment", els.courseDetail).forEach((item) => item.classList.toggle("active", Number(item.dataset.startMs) <= current && Number(item.dataset.startMs) + 20000 > current));
+      const nextSegment = $$(".segment", els.courseDetail).find((item) => Number(item.dataset.startMs) <= current && Number(item.dataset.startMs) + 20000 > current) || null;
+      if (nextSegment === activeSegment) return;
+      if (activeSegment) activeSegment.classList.remove("active");
+      if (nextSegment) nextSegment.classList.add("active");
+      activeSegment = nextSegment;
     });
   }
 }
@@ -719,6 +731,7 @@ function renderDetailProgress(courseId) {
 
 async function openCourse(courseId) {
   state.selectedCourseId = courseId;
+  state.detailTranscriptLimit = 160;
   try { state.lastDetail = await window.courseCapture.courses.get(courseId); renderCourseDetail(state.lastDetail); await refreshCourses(); setDatabaseMessage("點擊逐字稿時間戳可跳到影片片段。"); }
   catch (error) { setDatabaseMessage(error.message || "無法開啟課程"); }
 }
@@ -779,6 +792,11 @@ $(`[data-cancel-semester]`).addEventListener("click", () => showInlineForm("seme
 els.sourceList.addEventListener("click", (event) => { const card = event.target.closest("[data-source-id]"); if (card) selectSource(card.dataset.sourceId); });
 els.homeOpen.addEventListener("click", () => { setView("database"); if (state.courseId) openCourse(state.courseId); });
 els.reviewTabs.forEach((button) => button.addEventListener("click", () => setHomeReviewTab(button.dataset.reviewTab)));
+els.homeTranscript.addEventListener("click", (event) => {
+  if (!event.target.closest("[data-home-transcript-more]")) return;
+  state.homeTranscriptLimit += 160;
+  renderHomeTranscript(state.lastDetail?.segments || []);
+});
 els.homeCopy.addEventListener("click", async () => { if (!state.lastDetail?.notes) return; await navigator.clipboard.writeText(notePlainText(state.lastDetail.notes)); setStatus("課程筆記已複製到剪貼簿。", "success"); });
 $(`[data-refresh-models]`).addEventListener("click", refreshModels);
 $(`[data-cancel-model]`).addEventListener("click", cancelModelPull);
@@ -794,6 +812,7 @@ $(`[data-toggle-trash]`).addEventListener("click", (event) => { state.trashMode 
 els.courseList.addEventListener("click", (event) => { const card = event.target.closest("[data-course-id]"); if (card) openCourse(card.dataset.courseId); });
 els.courseDetail.addEventListener("click", (event) => {
   if (event.target.closest("[data-detail-category-save]")) { saveDetailCategory(); return; }
+  if (event.target.closest("[data-detail-transcript-more]")) { state.detailTranscriptLimit += 160; renderCourseDetail(state.lastDetail); return; }
   const segment = event.target.closest("[data-start-ms]");
   if (segment) { const player = $(`[data-detail-video]`, els.courseDetail); if (player) { player.currentTime = Number(segment.dataset.startMs) / 1000; player.play().catch(() => {}); } return; }
   const button = event.target.closest("[data-detail-back], [data-detail-action]");

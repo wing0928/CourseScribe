@@ -430,14 +430,14 @@ if (!gotSingleInstanceLock) {
       return await ollama.generateJson(args);
     } catch (error) {
       if (error.code !== "OLLAMA_BAD_JSON") throw error;
-      // A small local model may hit num_predict in the middle of a JSON
-      // object. Re-run the original task with more room; feeding the broken
-      // output back alongside the transcript makes the context longer and
-      // repeated the same failure on a real 13-minute course.
+      // Keep the retry bounded. The schema limits the number and length of
+      // cards, so a complete object should fit inside this allowance. Passing
+      // malformed output back would lengthen the context and made long
+      // lectures fail repeatedly on Gemma.
       return ollama.generateJson({
         ...args,
-        prompt: `${args.prompt}\n請用更精簡的措辭涵蓋所有主題，務必輸出完整閉合的 JSON。`,
-        maxOutputTokens: Math.min(2400, Math.max(1200, Number(args.maxOutputTokens || 650) * 2)),
+        prompt: `${args.prompt}\n重試要求：只保留最重要的 1–2 個主題與每題 1–2 個短重點；務必輸出完整閉合的 JSON。`,
+        maxOutputTokens: Math.min(1400, Math.max(900, Number(args.maxOutputTokens || 650))),
       });
     }
   }
@@ -463,7 +463,11 @@ if (!gotSingleInstanceLock) {
       error.code = "OLLAMA_MODEL_MISSING";
       throw error;
     }
-    const chunks = prepareTranscriptChunks(segments, 2000);
+    // Gemma receives a 16K context, so it can safely cover more source text
+    // per map pass.  This reduces expensive local generation calls on long
+    // lectures without sacrificing the bounded JSON contract.
+    const chunkChars = model === GEMMA_MODEL ? 2400 : 1500;
+    const chunks = prepareTranscriptChunks(segments, chunkChars);
     if (!chunks.length) throw new Error("逐字稿沒有可整理的文字。");
     const guide = getNoteGuide();
     const guideHash = createHash("sha256").update(`evidence-v1\n${guide}\n${JSON.stringify(MAP_SCHEMA)}`).digest("hex");
@@ -484,7 +488,7 @@ if (!gotSingleInstanceLock) {
       const baseProgress = Math.round((index / estimatedTotalSteps) * 100);
       emitProgress(courseId, "notes", `擷取主題第 ${index + 1}/${chunks.length} 段`, baseProgress, { model, etaSeconds: remainingSeconds() });
       const result = await generateJsonWithRepair({ model, prompt: buildMapPrompt(chunks[index], course.title, course.language), system: guide,
-        schema: MAP_SCHEMA, maxOutputTokens: 1500, timeoutMs: 600000,
+        schema: MAP_SCHEMA, maxOutputTokens: 1100, timeoutMs: 600000,
         onProgress: ({ characters, evalCount }) => emitProgress(courseId, "notes", `擷取第 ${index + 1}/${chunks.length} 段：已生成 ${characters} 字${evalCount ? `／${evalCount} token` : ""}`, baseProgress, { model, etaSeconds: remainingSeconds() }),
       });
       const map = verifyMapEvidence(result.value, chunks[index]);
