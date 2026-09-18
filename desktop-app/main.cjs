@@ -393,7 +393,13 @@ if (!gotSingleInstanceLock) {
     courseDb.updateJob(jobId, { status: "running", detail: "正在啟動背景轉錄", progress: 1 });
     emitProgress(courseId, "audio", `正在以背景程序準備${fileTypeLabel(media.media_type)}音訊`, 1);
     return new Promise((resolve, reject) => {
-      const worker = new Worker(path.join(__dirname, "whisper-worker.cjs"), { workerData: {
+      // Node workers cannot reliably execute an entry file virtualized inside
+      // app.asar.  electron-builder unpacks this file for packaged builds;
+      // development keeps the original path.
+      const workerSource = path.join(__dirname, "whisper-worker.cjs");
+      const unpackedWorker = workerSource.replace(/app\.asar([\\/])/, "app.asar.unpacked$1");
+      const workerPath = fsSync.existsSync(unpackedWorker) ? unpackedWorker : workerSource;
+      const worker = new Worker(workerPath, { workerData: {
         mediaPath: media.file_path, language, ffmpegPath,
         modelCacheDir: path.join(app.getPath("userData"), "whisper-models"),
       } });
@@ -427,7 +433,9 @@ if (!gotSingleInstanceLock) {
         else if (message.type === "error") finish(new Error(message.message));
       });
       worker.on("error", (error) => finish(error));
-      worker.on("exit", (code) => { if (!settled && code !== 0) finish(new Error(`背景轉錄程序意外結束（${code}）。`)); });
+      worker.on("exit", (code) => {
+        if (!settled) finish(new Error(`背景轉錄程序在送出結果前結束（${code}）。請重新轉錄。`));
+      });
     });
   }
 

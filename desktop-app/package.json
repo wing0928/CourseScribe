@@ -1,6 +1,6 @@
 {
   "name": "coursescribe-desktop",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "private": true,
   "description": "本機 Whisper 課程錄製與課後筆記桌面應用程式",
   "main": "main.cjs",
@@ -47,6 +47,7 @@
       "output": "release"
     },
     "asarUnpack": [
+      "whisper-worker.cjs",
       "node_modules/ffmpeg-static/ffmpeg.exe",
       "node_modules/onnxruntime-node/bin/napi-v6/win32/x64/**"
     ],
