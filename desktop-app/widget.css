@@ -3,7 +3,7 @@
 html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; }
 .widget-shell { height: 100%; border: 1px solid #35536b; border-radius: 16px; padding: 8px 10px 10px; background: rgba(6, 18, 29, .97); box-shadow: 0 16px 45px rgba(0, 0, 0, .5); }
 header { display: flex; align-items: center; justify-content: space-between; color: #7891a9; font-size: 10px; letter-spacing: .12em; }
-.drag-region { flex: 1; -webkit-app-region: drag; }
+.drag-region { flex: 1; padding: 3px 6px; border-radius: 6px; background: rgba(82, 139, 159, .17); color: #a9c9d9; cursor: move; -webkit-app-region: drag; }
 header button { width: 24px; height: 21px; border: 0; background: transparent; color: #88a0b7; font-size: 16px; -webkit-app-region: no-drag; }
 .record-row { display: flex; align-items: center; gap: 11px; margin: 3px 0 8px; }
 .record-dot { width: 10px; height: 10px; border-radius: 50%; background: #ff6675; box-shadow: 0 0 0 5px rgba(255, 102, 117, .13); animation: pulse 1.4s infinite; }

@@ -37,7 +37,13 @@ try {
   assert.equal(reopened.listCourses({}).some((item) => item.id === course.id), true);
   assert.equal(parseJsonResponse('{"summary":"x","keyPoints":["y"]}').summary, "x");
   assert.equal(parseJsonResponse('模型前言：{"summary":"x","keyPoints":["含有 { 括號"]}').summary, "x", "JSON 前言與字串內大括號仍應可解析");
-  assert.deepEqual(normalizeNoteShape({ summary: "x", keyPoints: ["y"] }), { summary: "x", sections: [{ title: "舊版重點（建議重新整理）", timestamp: "", points: [{ text: "y", quote: "", kind: "core", timestamp: "", status: "needs_review" }] }], confusions: [], reviewQuestions: [], takeaway: "" });
+  assert.deepEqual(normalizeNoteShape({ summary: "x", keyPoints: ["y"] }), { summary: "x", sections: [{ title: "舊版重點（建議重新整理）", timestamp: "", points: [{ text: "y", quote: "", kind: "core", timestamp: "", status: "needs_review" }] }], confusions: [], reviewQuestions: [], takeaway: "", annotations: [] });
+  const segment = reopened.addSegments(course.id, media.id, [{ startMs: 2000, text: "Galileo" }], "en-US")[0];
+  reopened.saveTranslations(course.id, "en", [{ segmentId: segment.id, text: "Galileo" }], "gemma4:e2b");
+  reopened.saveAnnotations(course.id, [{ term: "伽利略", aliases: ["gallelio"], note: "近代科學的重要人物。" }]);
+  const annotated = reopened.getCourseDetail(course.id);
+  assert.equal(annotated.translations.length, 1, "英文翻譯應保存於本機資料庫");
+  assert.equal(annotated.annotations[0].aliases[0], "gallelio", "術語別名應保存於本機資料庫");
   const prior = reopened.saveNotes(course.id, { status: "ready", json: { summary: "舊筆記" }, text: "舊筆記" });
   assert.equal(prior.json.summary, "舊筆記");
   reopened.saveNotes(course.id, { status: "processing" });
@@ -52,8 +58,9 @@ try {
   assert.match(main, /coursescribe-media/);
   assert.match(main, /TRASH_RETENTION_MS/);
   assert.match(main, /purgeExpiredTrash/);
+  assert.match(main, /whisper-worker/);
   assert.match(fs.readFileSync(path.join(__dirname, "..", "ollama.cjs"), "utf8"), /segment\.startMs/);
-  console.log(JSON.stringify({ ok: true, persistence: true, opencc: true, ollamaJson: true, singleInstance: true }));
+  console.log(JSON.stringify({ ok: true, persistence: true, translations: true, annotations: true, opencc: true, ollamaJson: true, singleInstance: true }));
 } finally {
   try { db.close(); } catch {}
   try { reopened?.close(); } catch {}

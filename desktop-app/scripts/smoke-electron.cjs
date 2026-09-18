@@ -158,7 +158,7 @@ async function run() {
     select.value = "__new__";
     select.dispatchEvent(new Event("change", { bubbles: true }));
     document.querySelector("[data-detail-new-category-input]").value = "新增測試分類";
-    document.querySelector("[data-detail-category-save]").click();
+    document.querySelector("[data-detail-save]").click();
   });
   await wait(500);
   const recategorized = await evaluate(window, async (courseId) => window.courseCapture.courses.get(courseId), created.id);

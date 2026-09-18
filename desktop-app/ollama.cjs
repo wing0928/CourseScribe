@@ -35,6 +35,7 @@ const SYNTHESIS_SCHEMA = {
   type: "object",
   properties: {
     summary: { type: "string", maxLength: 560 }, reviewQuestions: { type: "array", maxItems: 5, items: { type: "string", maxLength: 160 } }, takeaway: { type: "string", maxLength: 180 },
+    annotations: { type: "array", maxItems: 5, items: { type: "object", properties: { term: { type: "string", maxLength: 80 }, aliases: { type: "array", maxItems: 6, items: { type: "string", maxLength: 80 } }, note: { type: "string", maxLength: 180 } }, required: ["term", "aliases", "note"], additionalProperties: false } },
   },
   required: ["summary", "reviewQuestions", "takeaway"],
   additionalProperties: false,
@@ -105,6 +106,7 @@ function normalizeNoteShape(value) {
     confusions: list("confusions"),
     reviewQuestions: list("reviewQuestions"),
     takeaway: String(source.takeaway || "").trim(),
+    annotations: Array.isArray(source.annotations) ? source.annotations.map((item) => ({ term: String(item?.term || "").trim(), aliases: Array.isArray(item?.aliases) ? item.aliases.map((alias) => String(alias || "").trim()).filter(Boolean).slice(0, 6) : [], note: String(item?.note || "").trim() })).filter((item) => item.term && item.note).slice(0, 5) : [],
   };
 }
 
@@ -222,6 +224,7 @@ function assembleCourseNotes(maps, synthesis = {}) {
     confusions: [...new Set(maps.flatMap((item) => normalizeMap(item).uncertainties))],
     reviewQuestions: synthesis.reviewQuestions || [],
     takeaway: synthesis.takeaway || "依各主題重點與逐字稿時間戳複習。",
+    annotations: synthesis.annotations || [],
   });
 }
 
@@ -411,7 +414,7 @@ ${transcript}`;
 function buildSynthesisPrompt(maps, courseTitle, language = "zh-TW") {
   const languageInstruction = String(language).toLowerCase().startsWith("zh-tw") ? "使用臺灣繁體中文。" : `使用語言 ${language}。`;
   const cards = maps.flatMap((map) => normalizeMap(map).sections.flatMap((section) => section.points.filter((point) => point.status === "source_matched").map((point) => `[${point.timestamp}] ${section.title}：${point.text}（原文：${point.quote}）`))).join("\n");
-  return `請直接輸出 JSON，禁止輸出任何思考過程或 <think> 標籤。依系統提供的課程逐字稿整理規範，把以下已找到原文的主題卡統整成一段連貫的全課摘要，而不是按逐字稿每句或每段各寫一句。只輸出 JSON：summary 為 2–4 句的主題式摘要，說清核心概念及其關係或推導脈絡；reviewQuestions 為跨主題的 3–5 題；takeaway 為一句話總結。不要逐項羅列卡片，不要新增卡片未支持的姓名、關係、年代、數字或公式。沒有足夠原文支持的地方只寫需要核對，不可猜測。${languageInstruction}\n課程名稱：${courseTitle}\n可核對的主題卡：\n${cards || "沒有可核對的主題卡；summary 應指出需回查原始錄音或影片。"}`;
+  return `請直接輸出 JSON，禁止輸出任何思考過程或 <think> 標籤。依系統提供的課程逐字稿整理規範，把以下已找到原文的主題卡統整成一段連貫的全課摘要，而不是按逐字稿每句或每段各寫一句。只輸出 JSON：summary 為 2–4 句的主題式摘要，說清核心概念及其關係或推導脈絡；reviewQuestions 為跨主題的 3–5 題；takeaway 為一句話總結。annotations 最多列出 5 個「可安全判定」的專有名詞校正：term 為標準名稱、aliases 只列逐字稿中實際出現的明顯錯拼或別名、note 為一句簡短註釋。若無法由原文安全確認，不要輸出 annotations，也不可猜測人名或史實。註釋只用於閱讀時的顯示，不得改寫原始逐字稿。不要逐項羅列卡片，不要新增卡片未支持的姓名、關係、年代、數字或公式。沒有足夠原文支持的地方只寫需要核對，不可猜測。${languageInstruction}\n課程名稱：${courseTitle}\n可核對的主題卡：\n${cards || "沒有可核對的主題卡；summary 應指出需回查原始錄音或影片。"}`;
 }
 
 module.exports = { OllamaClient, DEFAULT_BASE_URL, DEFAULT_MODEL, HIGH_QUALITY_MODEL, GEMMA_MODEL, AVAILABLE_MODELS, DEFAULT_NUM_CONTEXT, GEMMA_NUM_CONTEXT, MAP_SCHEMA, SYNTHESIS_SCHEMA, getNoteGuide, parseJsonResponse, normalizeNoteShape, prepareTranscriptChunks, normalizeMap, verifyMapEvidence, assembleCourseNotes, buildMapPrompt, buildSynthesisPrompt };

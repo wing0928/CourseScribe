@@ -71,12 +71,13 @@ const state = {
   modelPulling: "",
   recording: null,
   notesProgress: new Map(),
+  detailTranscriptLanguage: "original",
 };
 
 const STATUS_LABELS = {
   draft: "草稿", recording: "錄製中", transcribing: "轉錄中", summarizing: "整理中", ready: "已完成", failed: "需處理",
 };
-const STAGE_LABELS = { model: "WHISPER", audio: "準備音訊", recording: "錄影中", transcribe: "轉錄中", notes: "整理筆記", complete: "完成", error: "需要處理" };
+const STAGE_LABELS = { model: "WHISPER", audio: "準備音訊", recording: "錄影中", transcribe: "轉錄中", notes: "整理筆記", translate: "翻譯逐字稿", complete: "完成", error: "需要處理" };
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[character]));
@@ -295,17 +296,42 @@ function renderNotes(note, target, modelLabel = "") {
 }
 
 function renderNoteBody(data) {
+  const annotations = Array.isArray(data.annotations) ? data.annotations : [];
+  const referenced = new Set();
+  const annotate = (value) => {
+    let html = formatNoteText(value || "");
+    for (const [index, annotation] of annotations.entries()) {
+      if (referenced.has(annotation.term)) continue;
+      const term = escapeHtml(annotation.term);
+      if (!term || !html.includes(term)) continue;
+      html = html.replace(term, `${term}<button type="button" class="footnote-link" data-footnote-id="footnote-${index}" aria-label="查看註釋 ${term}">[${index + 1}]</button>`);
+      referenced.add(annotation.term);
+    }
+    return html;
+  };
   const list = (items) => (Array.isArray(items) && items.length ? `<ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : `<p class="muted">無資料</p>`);
   const points = (items) => (Array.isArray(items) && items.length ? `<ul class="evidence-points">${items.map((raw) => {
     const point = typeof raw === "string" ? { text: raw } : raw || {};
     const matched = point.status === "source_matched" && point.quote && point.timestamp;
     const stamp = matched ? `<span class="evidence-stamp">[${escapeHtml(point.timestamp)}]</span> ` : "";
     const source = matched ? point.quote : point.quote ? `引文未在逐字稿中吻合：「${point.quote}」` : "沒有可回查的原文；舊版筆記請重新整理。";
-    return `<li>${point.kind === "extension" ? `<small class="note-extension">補充／可能考</small>` : ""}<div class="note-point-text">${formatNoteText(point.text || "")}</div><details class="note-source"><summary><span class="evidence-status ${matched ? "matched" : "pending"}">${stamp}${matched ? "原文吻合 · 查看依據" : "待核 · 查看原因"}</span></summary><blockquote>${escapeHtml(source)}</blockquote></details></li>`;
+    return `<li>${point.kind === "extension" ? `<small class="note-extension">補充／可能考</small>` : ""}<div class="note-point-text">${annotate(point.text || "")}</div><details class="note-source"><summary><span class="evidence-status ${matched ? "matched" : "pending"}">${stamp}${matched ? "原文吻合 · 查看依據" : "待核 · 查看原因"}</span></summary><blockquote>${escapeHtml(source)}</blockquote></details></li>`;
   }).join("")}</ul>` : `<p class="muted">無資料</p>`);
   const sections = (data.sections || []).map((section) => `<section class="note-topic"><h3>${escapeHtml(section.title)}${section.timestamp ? ` <small>[${escapeHtml(section.timestamp)}]</small>` : ""}</h3>${points(section.points)}</section>`).join("");
   const summary = String(data.summary || "").replace(/^本課涵蓋：[^。]+。/, "").trim() || `已整理 ${(data.sections || []).length} 個課程主題，請依下方時間戳核對。`;
-  return `<p class="note-caveat">AI 依逐字稿歸納主題，並非事實查核；人名、公式或轉錄疑點請回看原片。每個重點可展開原文依據。</p><section class="note-overview"><h3>全課主題概覽</h3><p>${formatNoteText(summary)}</p></section>${sections}<section class="note-followup"><h3>待確認／容易混淆處</h3>${list(data.confusions)}<h3>課後複習問題</h3>${list(data.reviewQuestions)}<h3>一句話總結</h3><p>${formatNoteText(data.takeaway || "無總結")}</p></section>`;
+  const footnotes = annotations.length ? `<section class="note-footnotes"><h3>註釋</h3><ol>${annotations.map((item, index) => `<li id="footnote-${index}"><b>${escapeHtml(item.term)}</b>：${escapeHtml(item.note)}</li>`).join("")}</ol></section>` : "";
+  return `<p class="note-caveat">AI 依逐字稿歸納主題，並非事實查核；人名、公式或轉錄疑點請回看原片。每個重點可展開原文依據。</p><section class="note-overview"><h3>全課主題概覽</h3><p>${annotate(summary)}</p></section>${sections}<section class="note-followup"><h3>待確認／容易混淆處</h3>${list(data.confusions)}<h3>課後複習問題</h3>${list(data.reviewQuestions)}<h3>一句話總結</h3><p>${annotate(data.takeaway || "無總結")}</p></section>${footnotes}`;
+}
+
+function applyTranscriptCorrections(value, annotations = []) {
+  let text = String(value || "");
+  for (const annotation of annotations) {
+    for (const alias of Array.isArray(annotation.aliases) ? annotation.aliases : []) {
+      const escaped = String(alias || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      if (escaped) text = text.replace(new RegExp(escaped, "gi"), String(annotation.term || alias));
+    }
+  }
+  return text;
 }
 
 function setHomeReviewTab(tab) {
@@ -614,6 +640,7 @@ async function stopRecording() {
 
 async function uploadMedia() {
   if (state.recording) return;
+  els.upload.disabled = true;
   try {
     const chosen = await window.courseCapture.media.choose();
     if (chosen.canceled) return;
@@ -621,10 +648,12 @@ async function uploadMedia() {
     state.courseId = course.id;
     beginProgressForCourse(course.id, `正在匯入${chosen.mediaType === "video" ? "影片" : "錄音"}`);
     els.state.textContent = "檔案已匯入";
+    setStatus(`正在安全匯入「${chosen.name}」…`);
     const media = await window.courseCapture.courses.importMedia(course.id, chosen.sourceId);
     const job = await window.courseCapture.transcription.start(course.id, media.id, course.language);
     setStatus(`已匯入「${chosen.name}」，Whisper 正在本機轉錄。工作編號 ${job.jobId.slice(0, 8)}。`, "success");
   } catch (error) { setStatus(`匯入失敗：${error.message || "請重新選擇檔案"}`, "error"); }
+  finally { els.upload.disabled = false; }
 }
 
 function renderModelStatus() {
@@ -694,15 +723,19 @@ function renderCourseDetail(detail) {
   const course = detail.course;
   const video = detail.media.find((item) => item.mediaType === "video" && item.mediaUrl);
   const mediaText = detail.media.map((item) => `${item.mediaType === "video" ? "影片" : "錄音"} · ${formatBytes(item.size)}`).join("／") || "尚無媒體";
+  const translations = new Map((detail.translations || []).filter((item) => item.targetLanguage === "en").map((item) => [item.segmentId, item.text]));
+  const english = state.detailTranscriptLanguage === "en";
   const visibleSegments = detail.segments.slice(0, state.detailTranscriptLimit);
   const segments = detail.segments.length
-    ? `${visibleSegments.map((item) => `<button type="button" class="segment" data-start-ms="${Number(item.startMs) || 0}"><time>${formatTime(item.startMs)}</time><span>${escapeHtml(item.text)}</span></button>`).join("")}${detail.segments.length > visibleSegments.length ? `<button type="button" class="quiet-button transcript-more" data-detail-transcript-more>載入更多逐字稿（尚餘 ${detail.segments.length - visibleSegments.length} 段）</button>` : ""}`
+    ? `${visibleSegments.map((item) => `<button type="button" class="segment" data-start-ms="${Number(item.startMs) || 0}"><time>${formatTime(item.startMs)}</time><span>${escapeHtml(english ? (translations.get(item.id) || "（尚未翻譯）") : applyTranscriptCorrections(item.text, detail.annotations))}</span></button>`).join("")}${detail.segments.length > visibleSegments.length ? `<button type="button" class="quiet-button transcript-more" data-detail-transcript-more>載入更多逐字稿（尚餘 ${detail.segments.length - visibleSegments.length} 段）</button>` : ""}`
     : `<div class="list-empty">目前沒有逐字稿片段。</div>`;
   const trash = Boolean(course.deleted_at);
   const categoryOptions = state.categories.map((item) => `<option value="${escapeHtml(item.id)}"${item.id === course.categoryId ? " selected" : ""}>${escapeHtml(item.name)}</option>`).join("");
-  const categoryEditor = trash ? "" : `<div class="detail-category-editor"><label for="detail-category-select">課程分類</label><select id="detail-category-select" data-detail-category><option value=""${!course.categoryId ? " selected" : ""}>未分類</option>${categoryOptions}<option value="__new__">＋ 新增分類</option></select><input data-detail-new-category-input type="text" maxlength="80" placeholder="輸入新分類名稱" aria-label="新分類名稱" hidden><button type="button" data-detail-category-save>儲存分類</button></div>`;
+  const semesterOptions = state.semesters.map((item) => `<option value="${escapeHtml(item)}"${item === course.semester ? " selected" : ""}>${escapeHtml(item)}</option>`).join("");
+  const modelOptions = (state.models.choices || []).map((item) => `<option value="${escapeHtml(item.name)}"${item.name === course.model ? " selected" : ""}>${escapeHtml(item.label)}</option>`).join("");
+  const courseEditor = trash ? "" : `<details class="course-editor"><summary>編輯這堂課的資訊</summary><div class="course-edit-grid"><label>課程名稱<input data-detail-title value="${escapeHtml(course.title)}" maxlength="200"></label><label>分類<select data-detail-category><option value=""${!course.categoryId ? " selected" : ""}>未分類</option>${categoryOptions}<option value="__new__">＋ 新增分類</option></select><input data-detail-new-category-input hidden placeholder="新增分類名稱" maxlength="80"></label><label>學期<select data-detail-semester><option value=""${!course.semester ? " selected" : ""}>未指定</option>${semesterOptions}<option value="__new__">＋ 新增學期</option></select><input data-detail-new-semester-input hidden placeholder="新增學期，例如 114-1" maxlength="40"></label><label>逐字稿語言<select data-detail-language><option value="zh-TW"${course.language === "zh-TW" ? " selected" : ""}>繁體中文（臺灣）</option><option value="zh-CN"${course.language === "zh-CN" ? " selected" : ""}>簡體中文</option><option value="en-US"${course.language === "en-US" ? " selected" : ""}>English</option><option value="ja-JP"${course.language === "ja-JP" ? " selected" : ""}>日本語</option></select></label><label>筆記模型<select data-detail-model>${modelOptions}</select></label></div><button type="button" data-detail-save>儲存全部資訊</button></details>`;
   els.courseDetail.hidden = false;
-  els.courseDetail.innerHTML = `<div class="detail-header"><div><button type="button" class="quiet-button" data-detail-back>← 返回列表</button><h2>${escapeHtml(course.title)}</h2><small>${escapeHtml(course.categoryName || "未分類")} · ${escapeHtml(course.semester || "未指定")} · ${escapeHtml(mediaText)} · ${STATUS_LABELS[course.status] || course.status}</small></div><div class="detail-actions">${trash ? `<button type="button" data-detail-action="restore">還原</button><button type="button" class="danger" data-detail-action="delete">永久刪除</button>` : `<button type="button" data-detail-action="retry">重新轉錄</button><button type="button" data-detail-action="notes">重新整理筆記</button><button type="button" class="danger" data-detail-action="trash">移到回收桶</button>`}</div></div>${categoryEditor}<div class="detail-ai-progress" data-detail-ai-progress hidden><b>Ollama 筆記整理進度</b><span data-detail-ai-copy></span><div class="progress-track"><i data-detail-ai-bar></i></div><small data-detail-ai-eta></small></div>${video ? `<div class="media-preview"><video controls preload="metadata" data-detail-video src="${escapeHtml(video.mediaUrl)}"></video></div>` : detail.media.length ? `<div class="audio-note">這門課是錄音檔。依設定不顯示影音預覽，但保留逐字稿時間戳。</div>` : ""}<div class="detail-grid"><section class="detail-section"><h3>完整逐字稿 · ${detail.segments.length} 段</h3><div class="detail-transcript" data-detail-transcript>${segments}</div></section><section class="detail-section"><h3>課程筆記</h3><div class="detail-note">${renderDetailNotes(detail.notes)}</div></section></div>${course.error ? `<div class="retry-box">${escapeHtml(course.error)}<br />可按上方重新轉錄或重新整理筆記。</div>` : ""}`;
+  els.courseDetail.innerHTML = `<div class="detail-header"><div><button type="button" class="quiet-button" data-detail-back>← 返回列表</button><h2>${escapeHtml(course.title)}</h2><small>${escapeHtml(course.categoryName || "未分類")} · ${escapeHtml(course.semester || "未指定")} · ${escapeHtml(mediaText)} · ${STATUS_LABELS[course.status] || course.status}</small></div><div class="detail-actions">${trash ? `<button type="button" data-detail-action="restore">還原</button><button type="button" class="danger" data-detail-action="delete">永久刪除</button>` : `<button type="button" data-detail-action="retry">重新轉錄</button><button type="button" data-detail-action="notes">重新整理筆記</button><button type="button" class="danger" data-detail-action="trash">移到回收桶</button>`}</div></div>${courseEditor}<div class="detail-ai-progress" data-detail-ai-progress hidden><b>本機處理進度</b><span data-detail-ai-copy></span><div class="progress-track"><i data-detail-ai-bar></i></div><small data-detail-ai-eta></small></div>${video ? `<div class="media-preview"><video controls preload="metadata" data-detail-video src="${escapeHtml(video.mediaUrl)}"></video></div>` : detail.media.length ? `<div class="audio-note">這門課是錄音檔。依設定不顯示影音預覽，但保留逐字稿時間戳。</div>` : ""}<div class="detail-grid"><section class="detail-section"><div class="detail-section-head"><h3>完整逐字稿 · ${detail.segments.length} 段</h3><div class="transcript-tools"><button type="button" data-detail-translate ${translations.size === detail.segments.length ? "disabled" : ""}>翻譯成英文</button><button type="button" data-detail-language-view="original" class="${!english ? "selected" : ""}">原文</button><button type="button" data-detail-language-view="en" class="${english ? "selected" : ""}" ${translations.size ? "" : "disabled"}>English</button></div></div><div class="detail-transcript" data-detail-transcript>${segments}</div></section><section class="detail-section"><h3>課程筆記</h3><div class="detail-note">${renderDetailNotes(detail.notes)}</div></section></div>${course.error ? `<div class="retry-box">${escapeHtml(course.error)}<br />可按上方重新轉錄或重新整理筆記。</div>` : ""}`;
   renderDetailProgress(course.id);
   const player = $(`[data-detail-video]`, els.courseDetail);
   if (player) {
@@ -722,25 +755,26 @@ function renderDetailProgress(courseId) {
   const panel = $(`[data-detail-ai-progress]`, els.courseDetail);
   if (!panel) return;
   const data = state.notesProgress.get(courseId);
-  panel.hidden = !data || data.stage !== "notes";
+  panel.hidden = !data || !["notes", "translate"].includes(data.stage);
   if (panel.hidden) return;
   $(`[data-detail-ai-copy]`, panel).textContent = `${data.detail || "正在整理"} · ${Number(data.progress) || 0}%`;
   $(`[data-detail-ai-bar]`, panel).style.width = `${Math.max(0, Math.min(100, Number(data.progress) || 0))}%`;
-  $(`[data-detail-ai-eta]`, panel).textContent = `本機 ${data.model || "Ollama"} · 預估剩餘時間：${formatEta(data.etaSeconds)}`;
+  $(`[data-detail-ai-eta]`, panel).textContent = data.stage === "notes" ? `本機 ${data.model || "Ollama"} · 預估剩餘時間：${formatEta(data.etaSeconds)}` : `本機 ${data.model || "Ollama"} · 不會修改原始逐字稿`;
 }
 
 async function openCourse(courseId) {
   state.selectedCourseId = courseId;
   state.detailTranscriptLimit = 160;
+  state.detailTranscriptLanguage = "original";
   try { state.lastDetail = await window.courseCapture.courses.get(courseId); renderCourseDetail(state.lastDetail); await refreshCourses(); setDatabaseMessage("點擊逐字稿時間戳可跳到影片片段。"); }
   catch (error) { setDatabaseMessage(error.message || "無法開啟課程"); }
 }
 
-async function saveDetailCategory() {
+async function saveDetailCourse() {
   const id = state.selectedCourseId;
   const select = $(`[data-detail-category]`, els.courseDetail);
   if (!id || !select) return;
-  const button = $(`[data-detail-category-save]`, els.courseDetail);
+  const button = $(`[data-detail-save]`, els.courseDetail);
   button.disabled = true;
   try {
     let categoryId = select.value || null;
@@ -752,10 +786,25 @@ async function saveDetailCategory() {
       state.categories = await window.courseCapture.categories.list();
       renderFilters();
     }
-    await window.courseCapture.courses.setCategory(id, categoryId);
-    if (els.dbCategory.value !== "all" && els.dbCategory.value !== categoryId) els.dbCategory.value = "all";
+    const semesterSelect = $(`[data-detail-semester]`, els.courseDetail);
+    let semester = semesterSelect?.value || "";
+    if (semester === "__new__") {
+      const name = $(`[data-detail-new-semester-input]`, els.courseDetail).value.trim();
+      if (!name) throw new Error("請輸入新學期名稱。");
+      await window.courseCapture.semesters.create(name);
+      semester = name;
+    }
+    await window.courseCapture.courses.update(id, {
+      title: $(`[data-detail-title]`, els.courseDetail).value,
+      categoryId,
+      semester: semester || null,
+      language: $(`[data-detail-language]`, els.courseDetail).value,
+      model: $(`[data-detail-model]`, els.courseDetail).value || state.models.selected,
+    });
+    [state.categories, state.semesters] = await Promise.all([window.courseCapture.categories.list(), window.courseCapture.semesters.list()]);
+    renderFilters();
     await openCourse(id);
-    setDatabaseMessage(`已儲存課程分類：${state.categories.find((item) => item.id === categoryId)?.name || "未分類"}。`);
+    setDatabaseMessage("已儲存這堂課的全部資訊。");
   } catch (error) {
     setDatabaseMessage(error.message || "無法儲存分類");
   } finally { button.disabled = false; }
@@ -771,8 +820,34 @@ async function handleDetailAction(action) {
     if (action === "delete") { if (!window.confirm("永久刪除這門課程及其媒體？媒體會移到 Windows 回收桶。")) return; await window.courseCapture.courses.deletePermanently(id); state.selectedCourseId = ""; els.courseDetail.hidden = true; setDatabaseMessage("課程已永久刪除。"); }
     if (action === "retry") { const job = await window.courseCapture.transcription.retry(id); setDatabaseMessage(`已重新開始轉錄，工作編號 ${job.jobId.slice(0, 8)}。`); }
     if (action === "notes") { await window.courseCapture.notes.generate(id, state.models.selected); setDatabaseMessage("課程筆記已重新整理。"); }
+    if (action === "translate") { await window.courseCapture.translations.generate(id, "en", state.models.selected); setDatabaseMessage("英文逐字稿已儲存，可切換查看。"); }
     await openCourse(state.selectedCourseId || id);
   } catch (error) { setDatabaseMessage(error.message || "操作失敗"); }
+}
+
+function enableInAppWidgetDrag() {
+  const handle = $(`[data-recording-widget] .widget-drag-handle`);
+  if (!handle) return;
+  let drag = null;
+  handle.addEventListener("pointerdown", (event) => {
+    const rect = els.recordingWidget.getBoundingClientRect();
+    drag = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    handle.setPointerCapture(event.pointerId);
+    handle.style.cursor = "grabbing";
+  });
+  handle.addEventListener("pointermove", (event) => {
+    if (!drag) return;
+    const rect = els.recordingWidget.getBoundingClientRect();
+    const left = Math.max(8, Math.min(window.innerWidth - rect.width - 8, event.clientX - drag.x));
+    const top = Math.max(8, Math.min(window.innerHeight - rect.height - 8, event.clientY - drag.y));
+    els.recordingWidget.style.left = `${left}px`;
+    els.recordingWidget.style.top = `${top}px`;
+    els.recordingWidget.style.right = "auto";
+    els.recordingWidget.style.bottom = "auto";
+  });
+  const stop = () => { drag = null; handle.style.cursor = "grab"; };
+  handle.addEventListener("pointerup", stop);
+  handle.addEventListener("pointercancel", stop);
 }
 
 els.nav.forEach((button) => button.addEventListener("click", () => setView(button.dataset.view)));
@@ -781,6 +856,7 @@ els.pauseRecording.addEventListener("click", () => toggleRecordingPause());
 els.widgetPause.addEventListener("click", () => toggleRecordingPause());
 els.widgetStop.addEventListener("click", stopRecording);
 els.widgetMinimize.addEventListener("click", () => window.courseCapture.widget.show());
+enableInAppWidgetDrag();
 els.upload.addEventListener("click", uploadMedia);
 $(`[data-refresh-sources]`).addEventListener("click", refreshSources);
 $(`[data-add-category]`).addEventListener("click", () => showInlineForm("category", true));
@@ -811,7 +887,12 @@ $(`[data-toggle-trash]`).addEventListener("click", (event) => { state.trashMode 
 });
 els.courseList.addEventListener("click", (event) => { const card = event.target.closest("[data-course-id]"); if (card) openCourse(card.dataset.courseId); });
 els.courseDetail.addEventListener("click", (event) => {
-  if (event.target.closest("[data-detail-category-save]")) { saveDetailCategory(); return; }
+  if (event.target.closest("[data-detail-save]")) { saveDetailCourse(); return; }
+  if (event.target.closest("[data-detail-translate]")) { handleDetailAction("translate"); return; }
+  const view = event.target.closest("[data-detail-language-view]");
+  if (view) { state.detailTranscriptLanguage = view.dataset.detailLanguageView; renderCourseDetail(state.lastDetail); return; }
+  const footnote = event.target.closest("[data-footnote-id]");
+  if (footnote) { document.getElementById(footnote.dataset.footnoteId)?.scrollIntoView({ behavior: "smooth", block: "center" }); return; }
   if (event.target.closest("[data-detail-transcript-more]")) { state.detailTranscriptLimit += 160; renderCourseDetail(state.lastDetail); return; }
   const segment = event.target.closest("[data-start-ms]");
   if (segment) { const player = $(`[data-detail-video]`, els.courseDetail); if (player) { player.currentTime = Number(segment.dataset.startMs) / 1000; player.play().catch(() => {}); } return; }
@@ -819,15 +900,21 @@ els.courseDetail.addEventListener("click", (event) => {
   if (button) handleDetailAction(button.dataset.detailAction || "back");
 });
 els.courseDetail.addEventListener("change", (event) => {
-  if (!event.target.matches("[data-detail-category]")) return;
-  const input = $(`[data-detail-new-category-input]`, els.courseDetail);
-  input.hidden = event.target.value !== "__new__";
-  if (!input.hidden) input.focus();
+  if (event.target.matches("[data-detail-category]")) {
+    const input = $(`[data-detail-new-category-input]`, els.courseDetail);
+    input.hidden = event.target.value !== "__new__";
+    if (!input.hidden) input.focus();
+  }
+  if (event.target.matches("[data-detail-semester]")) {
+    const input = $(`[data-detail-new-semester-input]`, els.courseDetail);
+    input.hidden = event.target.value !== "__new__";
+    if (!input.hidden) input.focus();
+  }
 });
 
 window.courseCapture.onProgress((data) => {
-  if (data?.courseId && data.stage === "notes") state.notesProgress.set(data.courseId, data);
-  if (data?.courseId && (data.stage === "complete" || data.stage === "error" || (data.stage === "notes" && data.progress === 100))) state.notesProgress.delete(data.courseId);
+  if (data?.courseId && (data.stage === "notes" || data.stage === "translate")) state.notesProgress.set(data.courseId, data);
+  if (data?.courseId && (data.stage === "complete" || data.stage === "error" || ((data.stage === "notes" || data.stage === "translate") && data.progress === 100))) state.notesProgress.delete(data.courseId);
   if (data?.courseId === state.selectedCourseId) renderDetailProgress(data.courseId);
   if (data?.courseId && data.courseId !== state.courseId && data.courseId !== state.selectedCourseId) return;
   setProgress(data);

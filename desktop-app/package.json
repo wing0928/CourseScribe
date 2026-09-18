@@ -1,12 +1,12 @@
 {
   "name": "coursescribe-desktop",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "private": true,
   "description": "本機 Whisper 課程錄製與課後筆記桌面應用程式",
   "main": "main.cjs",
   "scripts": {
     "start": "electron .",
-    "check": "node --check main.cjs && node --check preload.cjs && node --check renderer.js && node --check widget.js && node --check media-utils.cjs && node --check recording-segments.cjs && node --check database.cjs && node --check text-utils.cjs && node --check ollama.cjs && node --check scripts/smoke-electron.cjs && node --check scripts/verify-media-import.cjs && node --check scripts/verify-recording-segments.cjs && node --check scripts/verify-core.cjs && node --check scripts/verify-ollama.cjs && node --check scripts/verify-ollama-live.cjs",
+    "check": "node --check main.cjs && node --check preload.cjs && node --check renderer.js && node --check widget.js && node --check whisper-worker.cjs && node --check media-utils.cjs && node --check recording-segments.cjs && node --check database.cjs && node --check text-utils.cjs && node --check ollama.cjs && node --check scripts/smoke-electron.cjs && node --check scripts/verify-media-import.cjs && node --check scripts/verify-recording-segments.cjs && node --check scripts/verify-core.cjs && node --check scripts/verify-ollama.cjs && node --check scripts/verify-ollama-live.cjs",
     "verify:recording": "node scripts/verify-recording-segments.cjs",
     "verify:ui": "electron --no-sandbox --disable-gpu --disable-gpu-compositing --disable-features=VizDisplayCompositor --in-process-gpu scripts/smoke-electron.cjs",
     "verify:media": "node scripts/verify-media-import.cjs",

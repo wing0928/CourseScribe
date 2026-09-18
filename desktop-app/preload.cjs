@@ -42,6 +42,9 @@ contextBridge.exposeInMainWorld("courseCapture", {
   notes: {
     generate: (courseId, model) => ipcRenderer.invoke("notes:generate", { courseId, model }),
   },
+  translations: {
+    generate: (courseId, targetLanguage, model) => ipcRenderer.invoke("translations:generate", { courseId, targetLanguage, model }),
+  },
   models: {
     status: () => ipcRenderer.invoke("models:status"),
     select: (model) => ipcRenderer.invoke("models:select", model),

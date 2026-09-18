@@ -74,6 +74,31 @@ class CourseDatabase {
         FOREIGN KEY(course_id) REFERENCES courses(id) ON DELETE CASCADE,
         FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE SET NULL
       );
+      CREATE TABLE IF NOT EXISTS transcript_translations (
+        id TEXT PRIMARY KEY,
+        course_id TEXT NOT NULL,
+        segment_id TEXT NOT NULL,
+        target_language TEXT NOT NULL,
+        text TEXT NOT NULL,
+        model TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(segment_id, target_language),
+        FOREIGN KEY(course_id) REFERENCES courses(id) ON DELETE CASCADE,
+        FOREIGN KEY(segment_id) REFERENCES transcript_segments(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS course_annotations (
+        id TEXT PRIMARY KEY,
+        course_id TEXT NOT NULL,
+        term TEXT NOT NULL,
+        normalized_term TEXT NOT NULL,
+        note TEXT NOT NULL,
+        aliases_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(course_id, normalized_term),
+        FOREIGN KEY(course_id) REFERENCES courses(id) ON DELETE CASCADE
+      );
       CREATE TABLE IF NOT EXISTS notes (
         id TEXT PRIMARY KEY,
         course_id TEXT NOT NULL,
@@ -137,6 +162,8 @@ class CourseDatabase {
       CREATE INDEX IF NOT EXISTS idx_media_course ON media(course_id);
       CREATE INDEX IF NOT EXISTS idx_media_trash ON media(is_trash);
       CREATE INDEX IF NOT EXISTS idx_segments_course_time ON transcript_segments(course_id, start_ms);
+      CREATE INDEX IF NOT EXISTS idx_translations_course_target ON transcript_translations(course_id, target_language);
+      CREATE INDEX IF NOT EXISTS idx_annotations_course ON course_annotations(course_id);
     `);
     this.ensureColumn("media", "processing_status", "TEXT NOT NULL DEFAULT 'ready'");
     this.db.prepare("INSERT OR IGNORE INTO settings(key, value, updated_at) VALUES (?, ?, ?)").run("selectedOllamaModel", "qwen3:4b", now());
@@ -358,6 +385,51 @@ class CourseDatabase {
     this.run("DELETE FROM transcript_segments WHERE course_id=?", normalizeId(courseId));
   }
 
+  listTranslations(courseId, targetLanguage = null) {
+    const where = targetLanguage ? "WHERE course_id=? AND target_language=?" : "WHERE course_id=?";
+    const values = targetLanguage ? [normalizeId(courseId), String(targetLanguage)] : [normalizeId(courseId)];
+    return this.all(`SELECT segment_id AS segmentId,target_language AS targetLanguage,text,model,updated_at AS updatedAt FROM transcript_translations ${where} ORDER BY segment_id`, ...values);
+  }
+
+  saveTranslations(courseId, targetLanguage, items = [], model = null) {
+    const timestamp = now();
+    const insert = this.db.prepare(`INSERT INTO transcript_translations(id,course_id,segment_id,target_language,text,model,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(segment_id,target_language) DO UPDATE SET text=excluded.text,model=excluded.model,updated_at=excluded.updated_at`);
+    this.db.exec("BEGIN");
+    try {
+      for (const item of items) {
+        const segmentId = normalizeId(item?.segmentId);
+        const text = String(item?.text || "").trim();
+        if (!segmentId || !text) continue;
+        insert.run(randomUUID(), normalizeId(courseId), segmentId, String(targetLanguage), text, model ? String(model) : null, timestamp, timestamp);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    return this.listTranslations(courseId, targetLanguage);
+  }
+
+  listAnnotations(courseId) {
+    return this.all("SELECT id,term,normalized_term AS normalizedTerm,note,aliases_json AS aliasesJson,updated_at AS updatedAt FROM course_annotations WHERE course_id=? ORDER BY created_at", normalizeId(courseId)).map((row) => {
+      let aliases = [];
+      try { aliases = JSON.parse(row.aliasesJson || "[]"); } catch { aliases = []; }
+      return { ...row, aliases: Array.isArray(aliases) ? aliases : [] };
+    });
+  }
+
+  saveAnnotations(courseId, annotations = []) {
+    const timestamp = now();
+    this.run("DELETE FROM course_annotations WHERE course_id=?", normalizeId(courseId));
+    const insert = this.db.prepare("INSERT INTO course_annotations(id,course_id,term,normalized_term,note,aliases_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)");
+    for (const item of annotations) {
+      const term = String(item?.term || "").trim();
+      const note = String(item?.note || "").trim();
+      const aliases = [...new Set((Array.isArray(item?.aliases) ? item.aliases : []).map((alias) => String(alias || "").trim()).filter((alias) => alias && alias !== term))].slice(0, 6);
+      if (!term || !note) continue;
+      insert.run(randomUUID(), normalizeId(courseId), term, normalizeText(term), note, JSON.stringify(aliases), timestamp, timestamp);
+    }
+    return this.listAnnotations(courseId);
+  }
+
   listSegments(courseId) {
     return this.all("SELECT id,media_id,start_ms AS startMs,end_ms AS endMs,text,language FROM transcript_segments WHERE course_id=? ORDER BY start_ms,id", normalizeId(courseId));
   }
@@ -467,7 +539,7 @@ class CourseDatabase {
   getCourseDetail(courseId) {
     const course = this.getCourse(courseId);
     if (!course) return null;
-    return { course, media: this.listMedia(courseId, true), segments: this.listSegments(courseId), notes: this.getNotes(courseId), terms: this.listTerms(courseId) };
+    return { course, media: this.listMedia(courseId, true), segments: this.listSegments(courseId), notes: this.getNotes(courseId), terms: this.listTerms(courseId), translations: this.listTranslations(courseId), annotations: this.listAnnotations(courseId) };
   }
 
   trashCourse(courseId) {

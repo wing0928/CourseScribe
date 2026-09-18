@@ -37,6 +37,12 @@ function normalizeNotes(note, language = "zh-TW") {
       ? toTraditionalTaiwan(point, language)
       : { ...point, text: toTraditionalTaiwan(point.text, language), quote: toTraditionalTaiwan(point.quote, language) }) : [],
   }));
+  if (Array.isArray(clone.annotations)) clone.annotations = clone.annotations.map((item) => ({
+    ...item,
+    term: toTraditionalTaiwan(item?.term, language),
+    note: toTraditionalTaiwan(item?.note, language),
+    aliases: Array.isArray(item?.aliases) ? item.aliases.map((alias) => toTraditionalTaiwan(alias, language)) : [],
+  }));
   return clone;
 }
 

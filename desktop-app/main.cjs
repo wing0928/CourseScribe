@@ -16,6 +16,7 @@ const {
 const path = require("node:path");
 const fs = require("node:fs/promises");
 const fsSync = require("node:fs");
+const { Worker } = require("node:worker_threads");
 const os = require("node:os");
 const { randomUUID, createHash } = require("node:crypto");
 const { pathToFileURL } = require("node:url");
@@ -48,6 +49,11 @@ const { toTraditionalTaiwan, normalizeNotes } = require("./text-utils.cjs");
 const { segmentPath, findSegments, prepareRecordingMedia, inspectRecordingAudio } = require("./recording-segments.cjs");
 const APP_VERSION = require("./package.json").version;
 const TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const TRANSLATION_SCHEMA = {
+  type: "object",
+  properties: { items: { type: "array", items: { type: "object", properties: { id: { type: "string" }, text: { type: "string", maxLength: 1000 } }, required: ["id", "text"], additionalProperties: false } } },
+  required: ["items"], additionalProperties: false,
+};
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
@@ -125,6 +131,8 @@ if (!gotSingleInstanceLock) {
       segments: detail.segments.map(publicSegment),
       notes: detail.notes ? { ...detail.notes, json: detail.notes.json ? normalizeNoteShape(detail.notes.json) : null } : null,
       terms: detail.terms || [],
+      translations: detail.translations || [],
+      annotations: detail.annotations || [],
     };
   }
 
@@ -288,12 +296,16 @@ if (!gotSingleInstanceLock) {
       title: "CourseScribe 錄影工具",
       webPreferences: { preload: path.join(__dirname, "preload.cjs"), contextIsolation: true, nodeIntegration: false },
     });
-    widgetWindow.setAlwaysOnTop(true, "floating");
+    // The mini controller is intentionally above ordinary windows while a
+    // class is recording.  It is separate from the main window so switching
+    // apps never hides the timer or the stop control.
+    widgetWindow.setAlwaysOnTop(true, "screen-saver");
     widgetWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
     widgetWindow.webContents.once("did-finish-load", () => {
       widgetWindow.show();
       setTimeout(sendWidgetState, 0);
     });
+    widgetWindow.on("show", () => widgetWindow?.setAlwaysOnTop(true, "screen-saver"));
     widgetWindow.on("closed", () => { widgetWindow = null; });
     widgetWindow.loadFile(path.join(__dirname, "widget.html")).catch((error) => startupLog(`無法開啟錄影小工具: ${error.message}`));
     return widgetWindow;
@@ -377,42 +389,46 @@ if (!gotSingleInstanceLock) {
   async function transcribeFileCourse(courseId, mediaId, language, jobId) {
     const media = courseDb.getMedia(mediaId);
     if (!media) throw new Error("找不到要轉錄的媒體");
-    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "coursescribe-transcribe-"));
-    const wavPath = path.join(tempRoot, "audio.wav");
-    try {
-      courseDb.updateCourse(courseId, { status: "transcribing", error: null });
-      courseDb.updateJob(jobId, { status: "running", detail: "正在準備音訊", progress: 2 });
-      emitProgress(courseId, "audio", `正在準備${fileTypeLabel(media.media_type)}音訊`, 2);
-      await transcodeMediaToWav({ ffmpegPath, inputPath: media.file_path, outputPath: wavPath });
-      const audio = loadWavSamples(await fs.readFile(wavPath));
-      if (!audio.length) throw new Error("這個檔案沒有可用的音訊內容。");
-      const durationMs = Math.round(audio.length / 16000 * 1000);
-      const chunkMs = 20000;
-      const overlapMs = 2000;
-      let startMs = 0;
-      let chunkIndex = 0;
-      const total = Math.max(1, Math.ceil(durationMs / (chunkMs - overlapMs)));
-      while (startMs < durationMs || chunkIndex === 0) {
-        const baseEndMs = Math.min(durationMs, startMs + chunkMs);
-        const samples = audio.slice(Math.floor(startMs / 1000 * 16000), Math.floor(baseEndMs / 1000 * 16000));
-        const recognized = await recognizeAudio(samples, startMs, language, courseId);
-        courseDb.addSegments(courseId, mediaId, recognized, language);
-        chunkIndex += 1;
-        const progress = Math.min(100, Math.round(baseEndMs / durationMs * 100));
-        courseDb.updateJob(jobId, { status: "running", detail: `已完成第 ${chunkIndex}/${total} 段`, progress });
-        emitProgress(courseId, "transcribe", `正在轉錄第 ${chunkIndex}/${total} 段`, progress);
-        emitUpdated(courseId, "transcript");
-        if (baseEndMs >= durationMs) break;
-        startMs += chunkMs - overlapMs;
-      }
-      const segmentCount = courseDb.listSegments(courseId).length;
-      if (!segmentCount) throw new Error("Whisper 沒有辨識到可用文字，請確認檔案包含清楚的課程聲音。");
-      courseDb.updateJob(jobId, { status: "completed", detail: "逐字稿完成", progress: 100 });
-      emitProgress(courseId, "transcribe", "逐字稿完成，準備整理課程筆記", 100);
-      return segmentCount;
-    } finally {
-      await fs.rm(tempRoot, { recursive: true, force: true });
-    }
+    courseDb.updateCourse(courseId, { status: "transcribing", error: null });
+    courseDb.updateJob(jobId, { status: "running", detail: "正在啟動背景轉錄", progress: 1 });
+    emitProgress(courseId, "audio", `正在以背景程序準備${fileTypeLabel(media.media_type)}音訊`, 1);
+    return new Promise((resolve, reject) => {
+      const worker = new Worker(path.join(__dirname, "whisper-worker.cjs"), { workerData: {
+        mediaPath: media.file_path, language, ffmpegPath,
+        modelCacheDir: path.join(app.getPath("userData"), "whisper-models"),
+      } });
+      let settled = false;
+      const finish = (error = null) => {
+        if (settled) return;
+        settled = true;
+        worker.terminate().catch(() => {});
+        if (error) reject(error);
+        else {
+          const segmentCount = courseDb.listSegments(courseId).length;
+          if (!segmentCount) reject(new Error("Whisper 沒有辨識到可用文字，請確認檔案包含清楚的課程聲音。"));
+          else {
+            courseDb.updateJob(jobId, { status: "completed", detail: "逐字稿完成", progress: 100 });
+            emitProgress(courseId, "transcribe", "逐字稿完成，準備整理課程筆記", 100);
+            resolve(segmentCount);
+          }
+        }
+      };
+      worker.on("message", (message) => {
+        if (message.type === "stage") {
+          courseDb.updateJob(jobId, { status: "running", detail: message.detail, progress: Number(message.progress) || 1 });
+          emitProgress(courseId, "audio", message.detail, message.progress);
+        } else if (message.type === "segments") {
+          const recognized = (message.segments || []).map((segment) => ({ ...segment, text: normalizeWhisperText(segment.text, languageName(language), language) }));
+          courseDb.addSegments(courseId, mediaId, recognized, language);
+          courseDb.updateJob(jobId, { status: "running", detail: `已完成第 ${message.chunkIndex}/${message.total} 段`, progress: message.progress });
+          emitProgress(courseId, "transcribe", `正在轉錄第 ${message.chunkIndex}/${message.total} 段`, message.progress);
+          emitUpdated(courseId, "transcript");
+        } else if (message.type === "complete") finish();
+        else if (message.type === "error") finish(new Error(message.message));
+      });
+      worker.on("error", (error) => finish(error));
+      worker.on("exit", (code) => { if (!settled && code !== 0) finish(new Error(`背景轉錄程序意外結束（${code}）。`)); });
+    });
   }
 
   function noteMarkdown(course, note) {
@@ -511,11 +527,48 @@ if (!gotSingleInstanceLock) {
       startupLog(`全課摘要生成失敗，保留已完成主題：${error.message}`);
     }
     const note = normalizeNotes(assembleCourseNotes(maps, synthesis), course.language);
+    courseDb.saveAnnotations(courseId, note.annotations || []);
     const saved = courseDb.saveNotes(courseId, { model, status: "ready", json: note, text: noteMarkdown(course, note), error: null });
     courseDb.updateCourse(courseId, { status: "ready", model, error: null });
     emitProgress(courseId, "notes", "課程筆記完成", 100, { model });
     emitUpdated(courseId, "notes");
     return saved;
+  }
+
+  async function translateTranscriptForCourse(courseId, targetLanguage = "en", requestedModel = null) {
+    const course = courseDb.getCourse(courseId);
+    const segments = courseDb.listSegments(courseId);
+    if (!course || !segments.length) throw new Error("逐字稿尚未完成，無法翻譯。");
+    const model = String(requestedModel || course.model || courseDb.getSetting("selectedOllamaModel", DEFAULT_MODEL));
+    const status = await ollama.status();
+    if (!status.available) throw new Error("找不到本機 Ollama。請先啟動 Ollama 後再翻譯。");
+    if (!status.models.includes(model)) throw new Error(`本機尚未下載 ${model}。請先下載模型後再翻譯。`);
+    const target = String(targetLanguage || "en").toLowerCase() === "en" ? "English" : String(targetLanguage);
+    const batches = [];
+    for (let index = 0; index < segments.length; index += 24) batches.push(segments.slice(index, index + 24));
+    const translated = [];
+    for (let index = 0; index < batches.length; index += 1) {
+      const batch = batches[index];
+      const source = batch.map((segment) => ({ id: segment.id, text: segment.text }));
+      const result = await generateJsonWithRepair({
+        model,
+        system: "You are a careful academic transcript translator. Return valid JSON only. Preserve meaning, terminology, formulas and uncertainty; do not summarize, omit, merge or invent sentences.",
+        prompt: `Translate every item below into ${target}. Keep every id exactly once. Do not correct or rewrite the source transcript.\n${JSON.stringify({ items: source })}`,
+        schema: TRANSLATION_SCHEMA,
+        maxOutputTokens: 1800,
+        timeoutMs: 600000,
+        onProgress: ({ characters }) => emitProgress(courseId, "translate", `翻譯第 ${index + 1}/${batches.length} 段：已生成 ${characters} 字`, Math.round((index / batches.length) * 100), { model }),
+      });
+      const allowed = new Set(batch.map((segment) => segment.id));
+      const mapped = new Map((result.value?.items || []).filter((item) => allowed.has(String(item?.id)) && String(item?.text || "").trim()).map((item) => [String(item.id), String(item.text).trim()]));
+      if (mapped.size !== batch.length) throw new Error(`翻譯第 ${index + 1} 段不完整，原始逐字稿未變更，請重試。`);
+      translated.push(...batch.map((segment) => ({ segmentId: segment.id, text: mapped.get(segment.id) })));
+      emitProgress(courseId, "translate", `已完成第 ${index + 1}/${batches.length} 段英文翻譯`, Math.round(((index + 1) / batches.length) * 100), { model });
+    }
+    const rows = courseDb.saveTranslations(courseId, String(targetLanguage || "en"), translated, model);
+    emitProgress(courseId, "translate", "英文逐字稿已儲存", 100, { model });
+    emitUpdated(courseId, "translation");
+    return rows;
   }
 
   async function runImportedPipeline(courseId, mediaId, language, jobId) {
@@ -638,6 +691,7 @@ if (!gotSingleInstanceLock) {
 
   async function registerMediaFile(event, courseId, sourceId) {
     const source = getPendingImport(event, sourceId);
+    emitProgress(courseId, "audio", "正在安全移入本機媒體庫", null);
     const moved = await moveIntoLibrary(source.filePath, courseId, source.name);
     const media = courseDb.upsertMedia({
       courseId, filePath: moved.filePath, originalName: source.name,
@@ -645,6 +699,7 @@ if (!gotSingleInstanceLock) {
       mediaType: source.mediaType, extension: source.extension, size: moved.size, sha256: moved.sha256, processingStatus: "ready",
     });
     pendingImports.delete(String(sourceId));
+    emitProgress(courseId, "audio", "媒體已匯入，正在準備本機轉錄", 0);
     return publicMedia(media);
   }
 
@@ -869,6 +924,10 @@ if (!gotSingleInstanceLock) {
         emitUpdated(id, "notes-error");
         throw error;
       }
+    });
+    ipcMain.handle("translations:generate", async (_event, { courseId, targetLanguage, model }) => {
+      const id = validateCourseId(courseId);
+      return { translations: await translateTranscriptForCourse(id, targetLanguage || "en", model || null) };
     });
 
     ipcMain.handle("models:status", async () => ({ ...await ollama.status(), choices: AVAILABLE_MODELS, selected: courseDb.getSetting("selectedOllamaModel", DEFAULT_MODEL) }));
