@@ -20,7 +20,7 @@ async function run() {
   const ticker = setInterval(() => { beats += 1; }, 25);
   try {
     const outcome = await new Promise((resolve, reject) => {
-      const worker = new Worker(workerPath, { workerData: { mediaPath: input, language: "en-US", ffmpegPath, appRoot, modelCacheDir: path.join(process.env.APPDATA || root, "coursescribe-desktop", "whisper-models") } });
+      const worker = new Worker(workerPath, { workerData: { wavPath: input, language: "en-US", appRoot, modelCacheDir: path.join(process.env.APPDATA || root, "coursescribe-desktop", "whisper-models") } });
       const timer = setTimeout(() => { worker.terminate().catch(() => {}); reject(new Error("封裝 Worker 測試逾時")); }, 600000);
       worker.on("message", (message) => {
         if (message.type === "complete") { clearTimeout(timer); worker.terminate().catch(() => {}); resolve(message); }

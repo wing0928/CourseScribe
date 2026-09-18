@@ -1,7 +1,6 @@
 const { parentPort, workerData } = require("node:worker_threads");
 const fs = require("node:fs/promises");
 const path = require("node:path");
-const os = require("node:os");
 const { pathToFileURL } = require("node:url");
 const { createRequire } = require("node:module");
 
@@ -12,7 +11,6 @@ const { createRequire } = require("node:module");
 const appRoot = String(workerData?.appRoot || __dirname);
 const requireFromApp = createRequire(path.join(appRoot, "package.json"));
 const { WaveFile } = requireFromApp("wavefile");
-const { transcodeMediaToWav } = requireFromApp("./media-utils.cjs");
 
 function languageName(code) {
   return { "zh-TW": "chinese", "zh-CN": "chinese", "en-US": "english", "ja-JP": "japanese" }[code] || "chinese";
@@ -30,14 +28,11 @@ function loadWavSamples(wavBytes) {
 }
 
 async function run() {
-  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "coursescribe-transcribe-"));
-  const wavPath = path.join(tempRoot, "audio.wav");
-  try {
-    send("stage", { detail: "正在以背景程序準備音訊", progress: 2 });
-    await transcodeMediaToWav({ ffmpegPath: workerData.ffmpegPath, inputPath: workerData.mediaPath, outputPath: wavPath });
-    const audio = loadWavSamples(await fs.readFile(wavPath));
-    if (!audio.length) throw new Error("這個檔案沒有可用的音訊內容。");
-    send("stage", { detail: "正在載入背景 Whisper 模型", progress: 4 });
+  const wavPath = String(workerData.wavPath || "");
+  if (!wavPath) throw new Error("背景轉錄缺少已準備的音訊檔。請重新轉錄。");
+  const audio = loadWavSamples(await fs.readFile(wavPath));
+  if (!audio.length) throw new Error("這個檔案沒有可用的音訊內容。");
+  send("stage", { detail: "正在載入背景 Whisper 模型", progress: 4 });
     const transformersPath = requireFromApp.resolve("@huggingface/transformers");
     const { pipeline, env } = await import(pathToFileURL(transformersPath).href);
     env.cacheDir = workerData.modelCacheDir;
@@ -64,8 +59,7 @@ async function run() {
       if (endMs >= durationMs) break;
       startMs += chunkMs - overlapMs;
     }
-    send("complete", { durationMs, total });
-  } finally { await fs.rm(tempRoot, { recursive: true, force: true }); }
+  send("complete", { durationMs, total });
 }
 
 run().catch((error) => send("error", { message: error?.message || "背景 Whisper 轉錄失敗", stack: error?.stack || "" }));

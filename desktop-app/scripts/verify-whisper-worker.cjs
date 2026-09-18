@@ -15,7 +15,7 @@ async function run() {
   try {
     const outcome = await new Promise((resolve, reject) => {
       const worker = new Worker(path.join(__dirname, "..", "whisper-worker.cjs"), { workerData: {
-        mediaPath: input, language: "en-US", ffmpegPath, appRoot: path.join(__dirname, ".."),
+        wavPath: input, language: "en-US", appRoot: path.join(__dirname, ".."),
         modelCacheDir: path.join(process.env.APPDATA || root, "coursescribe-desktop", "whisper-models"),
       } });
       const timeout = setTimeout(() => { worker.terminate().catch(() => {}); reject(new Error("背景 Whisper Worker 測試逾時")); }, 600000);

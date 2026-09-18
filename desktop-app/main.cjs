@@ -392,7 +392,17 @@ if (!gotSingleInstanceLock) {
     courseDb.updateCourse(courseId, { status: "transcribing", error: null });
     courseDb.updateJob(jobId, { status: "running", detail: "正在啟動背景轉錄", progress: 1 });
     emitProgress(courseId, "audio", `正在以背景程序準備${fileTypeLabel(media.media_type)}音訊`, 1);
-    return new Promise((resolve, reject) => {
+    // Keep FFmpeg in Electron's main process. It is still asynchronous (the UI
+    // stays responsive), but avoids spawning an executable from inside an
+    // unpacked Node Worker, which can hang on packaged Windows installations.
+    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "coursescribe-transcribe-"));
+    const wavPath = path.join(tempRoot, "audio.wav");
+    try {
+      courseDb.updateJob(jobId, { status: "running", detail: "正在準備音訊", progress: 2 });
+      await transcodeMediaToWav({ ffmpegPath, inputPath: media.file_path, outputPath: wavPath });
+      courseDb.updateJob(jobId, { status: "running", detail: "音訊準備完成，正在啟動 Whisper", progress: 4 });
+      emitProgress(courseId, "audio", "音訊準備完成，正在載入背景 Whisper 模型", 4);
+      return await new Promise((resolve, reject) => {
       // Node workers cannot reliably execute an entry file virtualized inside
       // app.asar.  electron-builder unpacks this file for packaged builds;
       // development keeps the original path.
@@ -400,7 +410,7 @@ if (!gotSingleInstanceLock) {
       const unpackedWorker = workerSource.replace(/app\.asar([\\/])/, "app.asar.unpacked$1");
       const workerPath = fsSync.existsSync(unpackedWorker) ? unpackedWorker : workerSource;
       const worker = new Worker(workerPath, { workerData: {
-        mediaPath: media.file_path, language, ffmpegPath,
+        wavPath, language,
         appRoot: __dirname,
         modelCacheDir: path.join(app.getPath("userData"), "whisper-models"),
       } });
@@ -437,7 +447,10 @@ if (!gotSingleInstanceLock) {
       worker.on("exit", (code) => {
         if (!settled) finish(new Error(`背景轉錄程序在送出結果前結束（${code}）。請重新轉錄。`));
       });
-    });
+      });
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true });
+    }
   }
 
   function noteMarkdown(course, note) {
