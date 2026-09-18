@@ -3,9 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob: coursescribe-media:; connect-src 'self';" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; media-src 'self' blob: coursescribe-media:; connect-src 'self';" />
     <title>課間捕手 · CourseScribe</title>
     <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="node_modules/katex/dist/katex.min.css" />
   </head>
   <body>
     <main class="shell">
@@ -21,7 +22,7 @@
       <section class="view" data-view-panel="home">
         <div class="hero compact-hero">
           <div><p class="eyebrow">COURSE CAPTURE</p><h1>先專心上課，<br />下課再整理。</h1><p>錄製或匯入課程，逐字稿與重點會在課後留在本機資料庫。</p></div>
-          <div class="hero-badge"><span data-app-version>版本載入中</span><b>本機工作流程</b><small>Whisper · Ollama · Qwen</small></div>
+          <div class="hero-badge"><span data-app-version>版本載入中</span><b>本機工作流程</b><small>Whisper · Ollama · Qwen / Gemma</small></div>
         </div>
 
         <section class="capture-card" aria-labelledby="capture-title">
@@ -47,7 +48,7 @@
         <section class="progress-card" data-progress-card hidden><div class="progress-top"><span data-progress-stage>準備中</span><b data-progress-copy>正在處理課程</b><strong data-progress-percent>0%</strong></div><div class="progress-track"><i data-progress-bar></i></div><small data-progress-eta></small></section>
 
         <div class="home-columns">
-          <section class="panel notes-panel"><div class="panel-head"><div><p class="eyebrow">2 · REVIEW</p><h2>課程大綱與筆記</h2></div><span data-notes-model>尚未整理</span></div><div class="notes-content empty" data-home-notes><span>✦</span><b>完成課後轉錄後整理</b><p>本機 Qwen 會將課程整理成摘要、重點、名詞與複習問題。</p></div><div class="panel-actions"><button type="button" data-home-open disabled>查看資料庫課程</button><button type="button" data-home-copy disabled>複製筆記</button></div></section>
+          <section class="panel notes-panel"><div class="panel-head"><div><p class="eyebrow">2 · REVIEW</p><h2>課程總結與逐字稿</h2></div><span data-notes-model>尚未整理</span></div><div class="review-tabs" role="tablist" aria-label="課程內容"><button type="button" role="tab" aria-selected="true" data-review-tab="summary">主題總結</button><button type="button" role="tab" aria-selected="false" data-review-tab="transcript">逐字稿</button></div><div class="notes-content empty" role="tabpanel" data-home-notes><span>✦</span><b>完成課後轉錄後整理</b><p>本機 AI 會將課程整理成摘要、重點、名詞與複習問題。</p></div><div class="home-transcript" role="tabpanel" data-home-transcript hidden><p class="muted">尚未產生逐字稿。</p></div><div class="panel-actions"><button type="button" data-home-open disabled>查看資料庫課程</button><button type="button" data-home-copy disabled>複製筆記</button></div></section>
           <section class="panel model-panel"><div class="panel-head"><div><p class="eyebrow">LOCAL AI</p><h2>模型設定</h2></div><span data-ollama-badge>檢查中</span></div><div class="model-status" data-model-status><p>正在檢查本機 Ollama…</p></div><div class="panel-actions"><button type="button" data-refresh-models>重新檢查</button><button type="button" data-cancel-model hidden>取消下載</button><button type="button" data-open-ollama>安裝 Ollama</button></div></section>
         </div>
         <p class="status" role="status" data-status>準備好後選擇來源並開始錄製。</p>
@@ -67,6 +68,7 @@
       <button type="button" class="widget-stop" data-widget-stop>停止</button>
       <button type="button" class="widget-minimize" data-widget-minimize title="縮小成置頂小工具">↗</button>
     </aside>
+    <script src="node_modules/katex/dist/katex.min.js"></script>
     <script src="renderer.js"></script>
   </body>
 </html>

@@ -36,7 +36,7 @@ try {
   reopened.restoreCourse(course.id);
   assert.equal(reopened.listCourses({}).some((item) => item.id === course.id), true);
   assert.equal(parseJsonResponse('{"summary":"x","keyPoints":["y"]}').summary, "x");
-  assert.deepEqual(normalizeNoteShape({ summary: "x", keyPoints: ["y"] }), { summary: "x", sections: [{ title: "舊版重點（建議重新整理）", timestamp: "", points: [{ text: "y", quote: "", timestamp: "", status: "needs_review" }] }], confusions: [], reviewQuestions: [], takeaway: "" });
+  assert.deepEqual(normalizeNoteShape({ summary: "x", keyPoints: ["y"] }), { summary: "x", sections: [{ title: "舊版重點（建議重新整理）", timestamp: "", points: [{ text: "y", quote: "", kind: "core", timestamp: "", status: "needs_review" }] }], confusions: [], reviewQuestions: [], takeaway: "" });
   const prior = reopened.saveNotes(course.id, { status: "ready", json: { summary: "舊筆記" }, text: "舊筆記" });
   assert.equal(prior.json.summary, "舊筆記");
   reopened.saveNotes(course.id, { status: "processing" });

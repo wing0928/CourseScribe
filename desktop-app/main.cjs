@@ -416,7 +416,7 @@ if (!gotSingleInstanceLock) {
 
   function noteMarkdown(course, note) {
     const list = (items) => (items || []).map((item) => `- ${item}`).join("\n") || "- 無資料";
-    const points = (items) => (items || []).map((item) => `- ${item.text}（${item.status === "source_matched" ? `原文吻合 [${item.timestamp}]：「${item.quote}」` : `待核：${item.quote ? `原文未吻合「${item.quote}」` : "缺少可回查原文"}`}）`).join("\n") || "- 無資料";
+    const points = (items) => (items || []).map((item) => `- ${item.kind === "extension" ? "【補充／可能考】" : ""}${item.text}（${item.status === "source_matched" ? `原文吻合 [${item.timestamp}]：「${item.quote}」` : `待核：${item.quote ? `原文未吻合「${item.quote}」` : "缺少可回查原文"}`}）`).join("\n") || "- 無資料";
     return [
       `# ${course.title}`, "", "## 課程摘要", note.summary || "無摘要", "",
       ...(note.sections || []).flatMap((section) => [`## ${section.title}${section.timestamp ? ` [${section.timestamp}]` : ""}`, points(section.points), ""]),
@@ -447,7 +447,7 @@ if (!gotSingleInstanceLock) {
     const segments = courseDb.listSegments(courseId);
     if (!course || !segments.length) throw new Error("逐字稿尚未完成，無法整理課程筆記。");
     const model = String(requestedModel || courseDb.getSetting("selectedOllamaModel", DEFAULT_MODEL));
-    if (!AVAILABLE_MODELS.some((item) => item.name === model)) throw new Error("尚未選擇有效的 Qwen 模型。");
+    if (!AVAILABLE_MODELS.some((item) => item.name === model)) throw new Error("尚未選擇有效的 AI 模型。");
     courseDb.updateCourse(courseId, { status: "summarizing", model, error: null });
     courseDb.saveNotes(courseId, { model, status: "processing", error: null });
     emitUpdated(courseId, "notes-started");

@@ -19,11 +19,12 @@ const recoveryDb = new CourseDatabase(path.join(smokeRoot, "coursescribe.sqlite"
 const recoveryCourse = recoveryDb.createCourse({ title: "中斷復原測試", source: "recording", language: "zh-TW" });
 recoveryDb.saveNotes(recoveryCourse.id, { status: "ready", model: "qwen3:4b", json: {
   summary: "本課涵蓋：第一主題、第二主題。", sections: [
-    { title: "第一主題", timestamp: "00:20", points: [{ text: "第一個重點", quote: "第一個重點的原文", timestamp: "00:20", status: "source_matched" }] },
+    { title: "第一主題", timestamp: "00:20", points: [{ text: "第一個重點", quote: "第一個重點的原文", timestamp: "00:20", status: "source_matched" }, { text: "補充公式 $F=ma$", quote: "第一個重點的原文", kind: "extension", timestamp: "00:20", status: "source_matched" }] },
     { title: "第二主題", timestamp: "03:40", points: ["第二個重點"] },
   ], confusions: [], reviewQuestions: ["如何比較兩個主題？"], takeaway: "保留全部主題。",
 } });
 recoveryDb.upsertMedia({ id: "recovery-media", courseId: recoveryCourse.id, filePath: recoveryPath, originalName: "recovery.webm", mimeType: "video/webm", mediaType: "video", extension: "webm", size: 128, processingStatus: "recording" });
+recoveryDb.addSegments(recoveryCourse.id, "recovery-media", [{ startMs: 20000, endMs: 24000, text: "第一個重點的原文" }], "zh-TW");
 recoveryDb.close();
 app.setPath("userData", smokeRoot);
 app.commandLine.appendSwitch("disable-gpu");
@@ -76,10 +77,21 @@ async function run() {
     homeHasTranscript: Boolean(document.querySelector("[data-transcript]")),
     hasRecordingWidget: Boolean(document.querySelector("[data-recording-widget]")),
     hasPauseControl: Boolean(document.querySelector("[data-pause-recording]")),
+    hasReviewTabs: document.querySelectorAll("[data-review-tab]").length === 2,
     hasModelCancel: Boolean(document.querySelector("[data-cancel-model]")),
     hasWidgetBridge: Boolean(window.courseCapture.widget?.show && window.courseCapture.widget?.onAction),
   }));
-  if (!initial.hasHome || !initial.hasDatabase || initial.oldPicker || !initial.recordReady || !initial.uploadReady || initial.homeHasTranscript || !initial.hasRecordingWidget || !initial.hasPauseControl || !initial.hasModelCancel || !initial.hasWidgetBridge) fail(`首頁結構錯誤：${JSON.stringify(initial)}`);
+  if (!initial.hasHome || !initial.hasDatabase || initial.oldPicker || !initial.recordReady || !initial.uploadReady || initial.homeHasTranscript || !initial.hasRecordingWidget || !initial.hasPauseControl || !initial.hasReviewTabs || !initial.hasModelCancel || !initial.hasWidgetBridge) fail(`首頁結構錯誤：${JSON.stringify(initial)}`);
+  const homeReview = await evaluate(window, async (courseId) => {
+    state.courseId = courseId;
+    await refreshHomeNotes(courseId);
+    const summary = document.querySelector("[data-home-notes]").textContent;
+    document.querySelector('[data-review-tab="transcript"]').click();
+    const transcript = document.querySelector("[data-home-transcript]").textContent;
+    return { summary, transcript, summaryHidden: document.querySelector("[data-home-notes]").hidden, transcriptSelected: document.querySelector('[data-review-tab="transcript"]').getAttribute("aria-selected") };
+  }, recoveryCourse.id);
+  if (!homeReview.summary.includes("第一主題") || !homeReview.transcript.includes("第一個重點的原文") || !homeReview.summaryHidden || homeReview.transcriptSelected !== "true") fail(`首頁總結／逐字稿切換失敗：${JSON.stringify(homeReview)}`);
+  await evaluate(window, () => document.querySelector('[data-review-tab="summary"]').click());
 
   await evaluate(window, () => document.querySelector("[data-view=database]").click());
   await wait(250);
@@ -91,6 +103,8 @@ async function run() {
   if (!genericNotes.includes("第一主題") || !genericNotes.includes("第二主題") || genericNotes.includes("科學史人物")) fail("通用主題筆記沒有正確顯示");
   if (!genericNotes.includes("並非事實查核")) fail("筆記必須提醒逐字稿辨識錯誤的風險");
   if (!genericNotes.includes("原文吻合") || !genericNotes.includes("第一個重點的原文") || !genericNotes.includes("待核")) fail("來源引文與舊筆記待核狀態未正確顯示");
+  const mathView = await evaluate(window, () => ({ rendered: Boolean(document.querySelector(".detail-note .katex")), extension: Boolean(document.querySelector(".detail-note .note-extension")), evidenceCollapsed: !document.querySelector(".detail-note .note-source")?.open }));
+  if (!mathView.rendered || !mathView.extension || !mathView.evidenceCollapsed) fail(`公式排版或主題筆記樣式錯誤：${JSON.stringify(mathView)}`);
   const readableSize = await evaluate(window, () => {
     const sample = document.createElement("button");
     sample.className = "segment";

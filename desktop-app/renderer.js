@@ -26,6 +26,8 @@ const els = {
   progressBar: $(`[data-progress-bar]`),
   progressEta: $(`[data-progress-eta]`),
   homeNotes: $(`[data-home-notes]`),
+  homeTranscript: $(`[data-home-transcript]`),
+  reviewTabs: $$(`[data-review-tab]`),
   homeNotesModel: $(`[data-notes-model]`),
   homeOpen: $(`[data-home-open]`),
   homeCopy: $(`[data-home-copy]`),
@@ -62,6 +64,7 @@ const state = {
   selectedCourseId: "",
   trashMode: false,
   lastDetail: null,
+  homeReviewTab: "summary",
   models: { available: false, models: [], choices: [], selected: "qwen3:4b" },
   modelPulling: "",
   recording: null,
@@ -75,6 +78,20 @@ const STAGE_LABELS = { model: "WHISPER", audio: "準備音訊", recording: "錄�
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[character]));
+}
+
+function formatNoteText(value) {
+  const text = String(value ?? "");
+  const math = /\$\$([\s\S]+?)\$\$|\$([^$\n]+?)\$/g;
+  let html = "";
+  let start = 0;
+  for (const match of text.matchAll(math)) {
+    html += escapeHtml(text.slice(start, match.index));
+    try { html += window.katex?.renderToString(match[1] || match[2], { displayMode: Boolean(match[1]), throwOnError: false, trust: false, strict: "ignore" }) || escapeHtml(match[0]); }
+    catch { html += escapeHtml(match[0]); }
+    start = match.index + match[0].length;
+  }
+  return html + escapeHtml(text.slice(start));
 }
 
 function formatBytes(value) {
@@ -267,7 +284,7 @@ function formatEta(seconds) {
 function renderNotes(note, target, modelLabel = "") {
   if (!note?.json) {
     target.className = "notes-content empty";
-    target.innerHTML = `<span>✦</span><b>${note?.status === "error" ? "課程筆記尚未完成" : "完成課後轉錄後整理"}</b><p>${escapeHtml(note?.error || "本機 Qwen 會依逐字稿整理各主題、全課概覽與複習問題。")}</p>`;
+    target.innerHTML = `<span>✦</span><b>${note?.status === "error" ? "課程筆記尚未完成" : "完成課後轉錄後整理"}</b><p>${escapeHtml(note?.error || "本機 AI 會依逐字稿整理各主題、全課概覽與複習問題。")}</p>`;
     return;
   }
   const data = note.json;
@@ -281,11 +298,26 @@ function renderNoteBody(data) {
     const point = typeof raw === "string" ? { text: raw } : raw || {};
     const matched = point.status === "source_matched" && point.quote && point.timestamp;
     const stamp = matched ? `<span class="evidence-stamp">[${escapeHtml(point.timestamp)}]</span> ` : "";
-    return `<li><div>${escapeHtml(point.text || "")}</div><small class="evidence-status ${matched ? "matched" : "pending"}">${stamp}${matched ? "原文吻合" : "待核"}</small><blockquote>${matched ? escapeHtml(point.quote) : escapeHtml(point.quote ? `引文未在逐字稿中吻合：「${point.quote}」` : "沒有可回查的原文；舊版筆記請重新整理。")}</blockquote></li>`;
+    const source = matched ? point.quote : point.quote ? `引文未在逐字稿中吻合：「${point.quote}」` : "沒有可回查的原文；舊版筆記請重新整理。";
+    return `<li>${point.kind === "extension" ? `<small class="note-extension">補充／可能考</small>` : ""}<div class="note-point-text">${formatNoteText(point.text || "")}</div><details class="note-source"><summary><span class="evidence-status ${matched ? "matched" : "pending"}">${stamp}${matched ? "原文吻合 · 查看依據" : "待核 · 查看原因"}</span></summary><blockquote>${escapeHtml(source)}</blockquote></details></li>`;
   }).join("")}</ul>` : `<p class="muted">無資料</p>`);
-  const sections = (data.sections || []).map((section) => `<h3>${escapeHtml(section.title)}${section.timestamp ? ` <small>[${escapeHtml(section.timestamp)}]</small>` : ""}</h3>${points(section.points)}`).join("");
+  const sections = (data.sections || []).map((section) => `<section class="note-topic"><h3>${escapeHtml(section.title)}${section.timestamp ? ` <small>[${escapeHtml(section.timestamp)}]</small>` : ""}</h3>${points(section.points)}</section>`).join("");
   const summary = String(data.summary || "").replace(/^本課涵蓋：[^。]+。/, "").trim() || `已整理 ${(data.sections || []).length} 個課程主題，請依下方時間戳核對。`;
-  return `<p class="note-caveat">AI 只根據語音逐字稿整理，並非事實查核。「原文吻合」只表示引文出現在逐字稿；逐字稿或解讀仍可能有錯。全課概覽也屬未逐句核對的 AI 摘要。</p><h3>全課概覽</h3><p>${escapeHtml(summary)}</p>${sections}<h3>待確認／容易混淆處</h3>${list(data.confusions)}<h3>課後複習問題</h3>${list(data.reviewQuestions)}<h3>一句話總結</h3><p>${escapeHtml(data.takeaway || "無總結")}</p>`;
+  return `<p class="note-caveat">AI 依逐字稿歸納主題，並非事實查核；人名、公式或轉錄疑點請回看原片。每個重點可展開原文依據。</p><section class="note-overview"><h3>全課主題概覽</h3><p>${formatNoteText(summary)}</p></section>${sections}<section class="note-followup"><h3>待確認／容易混淆處</h3>${list(data.confusions)}<h3>課後複習問題</h3>${list(data.reviewQuestions)}<h3>一句話總結</h3><p>${formatNoteText(data.takeaway || "無總結")}</p></section>`;
+}
+
+function setHomeReviewTab(tab) {
+  state.homeReviewTab = tab === "transcript" ? "transcript" : "summary";
+  els.homeNotes.hidden = state.homeReviewTab !== "summary";
+  els.homeTranscript.hidden = state.homeReviewTab !== "transcript";
+  for (const button of els.reviewTabs) button.setAttribute("aria-selected", String(button.dataset.reviewTab === state.homeReviewTab));
+  els.homeCopy.hidden = state.homeReviewTab !== "summary";
+}
+
+function renderHomeTranscript(segments = []) {
+  els.homeTranscript.innerHTML = segments.length
+    ? segments.map((item) => `<div class="home-transcript-line"><time>${formatTime(item.startMs)}</time><span>${escapeHtml(item.text)}</span></div>`).join("")
+    : `<p class="muted">尚未產生逐字稿；錄影與轉錄完成後會顯示在這裡。</p>`;
 }
 
 function notePlainText(note) {
@@ -295,7 +327,7 @@ function notePlainText(note) {
   const summary = String(json.summary || "").replace(/^本課涵蓋：[^。]+。/, "").trim();
   return [`全課概覽\n${summary}`, ...(json.sections || []).map((section) => `${section.title}${section.timestamp ? ` [${section.timestamp}]` : ""}\n${(section.points || []).map((raw) => {
     const point = typeof raw === "string" ? { text: raw } : raw || {};
-    return `• ${point.text || ""}（${point.status === "source_matched" ? `原文吻合 [${point.timestamp}]：「${point.quote}」` : `待核${point.quote ? `：引文未吻合「${point.quote}」` : "：無可回查原文"}`}）`;
+    return `• ${point.kind === "extension" ? "【補充／可能考】" : ""}${point.text || ""}（${point.status === "source_matched" ? `原文吻合 [${point.timestamp}]：「${point.quote}」` : `待核${point.quote ? `：引文未吻合「${point.quote}」` : "：無可回查原文"}`}）`;
   }).join("\n")}`), `待確認／容易混淆處\n${(json.confusions || []).map((item) => `• ${item}`).join("\n")}`, `課後複習問題\n${(json.reviewQuestions || []).map((item) => `• ${item}`).join("\n")}`, `一句話總結\n${json.takeaway || ""}`].join("\n\n");
 }
 
@@ -305,7 +337,9 @@ async function refreshHomeNotes(courseId = state.courseId) {
     const detail = await window.courseCapture.courses.get(courseId);
     if (!detail) return;
     state.lastDetail = detail;
-    renderNotes(detail.notes, els.homeNotes, detail.notes?.model || "本機 Qwen");
+    renderNotes(detail.notes, els.homeNotes, detail.notes?.model || "本機 AI");
+    renderHomeTranscript(detail.segments);
+    setHomeReviewTab(state.homeReviewTab);
     els.homeNotesModel.textContent = detail.notes?.model || (detail.course.status === "ready" ? "已完成" : STATUS_LABELS[detail.course.status] || "處理中");
     els.homeOpen.disabled = false;
     els.homeCopy.disabled = !detail.notes?.json;
@@ -593,11 +627,11 @@ function renderModelStatus() {
   if (els.cancelModel) els.cancelModel.hidden = !state.modelPulling;
   if (els.cancelModel) els.cancelModel.textContent = state.modelPulling ? `取消 ${state.modelPulling}` : "取消下載";
   els.model.innerHTML = (modelState.choices || []).map((choice) => `<option value="${escapeHtml(choice.name)}"${choice.name === modelState.selected ? " selected" : ""}>${escapeHtml(choice.label)}</option>`).join("");
-  if (!modelState.choices?.length) els.model.innerHTML = `<option value="qwen3:4b">Qwen 3 · 4B（較快）</option><option value="qwen3:8b">Qwen 3 · 8B（較慢）</option>`;
+  if (!modelState.choices?.length) els.model.innerHTML = `<option value="qwen3:4b">Qwen 3 · 4B（較快）</option><option value="qwen3:8b">Qwen 3 · 8B（較慢）</option><option value="gemma4:e2b">Gemma 4 · E2B</option>`;
   els.ollamaBadge.textContent = modelState.available ? "Ollama 已連線" : "需要設定";
   els.ollamaBadge.className = modelState.available ? "ollama-ok" : "ollama-error";
   if (!modelState.available) {
-    els.modelStatus.innerHTML = `<p class="ollama-error">尚未連線到本機 Ollama。</p><p>安裝後啟動 Ollama，再下載一個 Qwen 模型即可使用免費本機 AI 整理。</p>`;
+    els.modelStatus.innerHTML = `<p class="ollama-error">尚未連線到本機 Ollama。</p><p>安裝後啟動 Ollama，再下載一個 AI 模型（如 Qwen 或 Gemma）即可使用免費本機 AI 整理。</p>`;
     return;
   }
   els.modelStatus.innerHTML = (modelState.choices || []).map((choice) => {
@@ -645,8 +679,8 @@ async function refreshCourses() {
 }
 
 function renderDetailNotes(note) {
-  if (!note?.json) return `<div class="empty"><span>✦</span><b>${note?.status === "error" ? "整理失敗" : "尚未產生筆記"}</b><p>${escapeHtml(note?.error || "完成逐字稿後可使用本機 Qwen 整理。")}</p></div>`;
-  return `<p class="model-label">模型：${escapeHtml(note.model || "本機 Qwen")}${note.status === "processing" ? " · 正在重新整理，以下為前次筆記" : note.status === "error" ? " · 本次整理失敗，以下為前次筆記" : ""}</p>${renderNoteBody(note.json)}`;
+  if (!note?.json) return `<div class="empty"><span>✦</span><b>${note?.status === "error" ? "整理失敗" : "尚未產生筆記"}</b><p>${escapeHtml(note?.error || "完成逐字稿後可使用本機 AI 整理。")}</p></div>`;
+  return `<p class="model-label">模型：${escapeHtml(note.model || "本機 AI")}${note.status === "processing" ? " · 正在重新整理，以下為前次筆記" : note.status === "error" ? " · 本次整理失敗，以下為前次筆記" : ""}</p>${renderNoteBody(note.json)}`;
 }
 
 function renderCourseDetail(detail) {
@@ -744,6 +778,7 @@ $(`[data-cancel-category]`).addEventListener("click", () => showInlineForm("cate
 $(`[data-cancel-semester]`).addEventListener("click", () => showInlineForm("semester", false));
 els.sourceList.addEventListener("click", (event) => { const card = event.target.closest("[data-source-id]"); if (card) selectSource(card.dataset.sourceId); });
 els.homeOpen.addEventListener("click", () => { setView("database"); if (state.courseId) openCourse(state.courseId); });
+els.reviewTabs.forEach((button) => button.addEventListener("click", () => setHomeReviewTab(button.dataset.reviewTab)));
 els.homeCopy.addEventListener("click", async () => { if (!state.lastDetail?.notes) return; await navigator.clipboard.writeText(notePlainText(state.lastDetail.notes)); setStatus("課程筆記已複製到剪貼簿。", "success"); });
 $(`[data-refresh-models]`).addEventListener("click", refreshModels);
 $(`[data-cancel-model]`).addEventListener("click", cancelModelPull);

@@ -30,7 +30,7 @@ async function main() {
     model, prompt: buildSynthesisPrompt(maps, "跨主題課程"), system: guide, schema: SYNTHESIS_SCHEMA,
     maxOutputTokens: 600, timeoutMs: 600000,
   });
-  assert.equal(final.value.summaryParts?.length, chunks.length, "摘要必須對每個分段各寫一句");
+  assert.ok(String(final.value.summary || "").trim(), "模型必須產生跨主題整體摘要");
   const note = assembleCourseNotes(maps, final.value);
   assert.ok(note.sections.some((section) => /假設|變因|測試/.test(section.title + section.points.map((point) => point.text).join(""))), "研究方法主題遺漏");
   assert.ok(note.sections.some((section) => /表格|圖表|樣本/.test(section.title + section.points.map((point) => point.text).join(""))), "資料呈現主題遺漏");

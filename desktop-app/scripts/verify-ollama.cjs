@@ -9,7 +9,7 @@ const map = { sections: [
   { title: "概念一", timestamp: "00:00", points: [{ text: "第一個概念的條件與結論", quote: "第一個概念的條件" }] },
   { title: "概念二", timestamp: "03:20", points: [{ text: "第二個概念的步驟", quote: "第二個概念的步驟" }] },
 ], uncertainties: ["一個詞辨識不清"] };
-const synthesis = { summaryParts: ["課程比較兩個概念及其使用條件。"], reviewQuestions: ["兩者有何不同？"], takeaway: "依條件選擇方法。" };
+const synthesis = { summary: "課程比較兩個概念及其使用條件。", reviewQuestions: ["兩者有何不同？"], takeaway: "依條件選擇方法。" };
 const generateRequests = [];
 
 const server = http.createServer(async (request, response) => {
@@ -80,11 +80,18 @@ server.listen(0, "127.0.0.1", async () => {
     assert.equal(notes.sections.length, 2, "全課摘要不得吞掉分段主題");
     const repeated = assembleCourseNotes([{ sections: [map.sections[0], map.sections[0], map.sections[1]], uncertainties: [] }], synthesis);
     assert.equal(repeated.sections.length, 2, "相鄰同名主題應去重但不得遺失其他主題");
-    assert.equal(notes.summary, synthesis.summaryParts[0], "全課概覽不應被冗長的主題清單蓋過");
+    assert.match(notes.summary, /課程比較兩個概念/, "全課概覽應保留整體摘要");
     const partial = assembleCourseNotes([{ sections: [verified.sections[0]], uncertainties: [] }, { sections: [verified.sections[1]], uncertainties: [] }], synthesis);
-    assert.match(partial.summary, /第 2 段討論 概念二/, "模型漏寫某段概覽時必須保留該段主題");
-    const pendingSummary = assembleCourseNotes([falseQuote], { summaryParts: ["模型捏造的概覽"] });
-    assert.match(pendingSummary.summary, /重點皆待核/, "沒有來源吻合的段落不可採信模型摘要");
+    assert.match(partial.summary, /概念一/, "模型漏寫前段主題時須補足課程覆蓋");
+    assert.match(partial.summary, /概念二/, "模型漏寫後段主題時須補足課程覆蓋");
+    assert.equal(partial.sections.length, 2, "摘要不得刪除後段主題");
+    const pendingSummary = assembleCourseNotes([falseQuote], { summary: "模型捏造的概覽" });
+    assert.match(pendingSummary.summary, /沒有可與逐字稿原文吻合/, "沒有來源吻合的重點不可採信模型摘要");
+    const omittedFirst = assembleCourseNotes([{ sections: [verified.sections[0]], uncertainties: [] }, { sections: [verified.sections[1]], uncertainties: [] }], { summary: "第二個概念的步驟可以用來處理後段問題。" });
+    assert.match(omittedFirst.summary, /本課也涵蓋概念一/, "只提後段的模型摘要必須補回前段主題");
+    assert.match(buildMapPrompt(chunks.join("\n"), "測試課程"), /不要逐句分析/);
+    assert.match(buildSynthesisPrompt([verified], "測試課程"), /統整成一段連貫的全課摘要/);
+    assert.match(guide, /補充／可能考/);
     assert.deepEqual(notes.confusions, map.uncertainties);
     assert.ok(!Object.hasOwn(notes, "historicalFigures"), "不得再輸出固定的人物欄位");
     console.log(JSON.stringify({ ok: true, markdownSent: true, evidenceMatched: true, unmatchedNeedsReview: true, legacyNeedsReview: true, everySectionPreserved: true, streamProgress: true }));
