@@ -329,6 +329,17 @@ class CourseDatabase {
     return this.all("SELECT * FROM media WHERE processing_status=? ORDER BY created_at", String(status));
   }
 
+  getMostRecentInterruptedTranscription() {
+    return this.get(`SELECT c.id AS course_id,c.title,c.language,m.id AS media_id
+      FROM courses c JOIN media m ON m.course_id=c.id
+      WHERE c.deleted_at IS NULL AND c.status='transcribing' AND m.is_trash=0 AND m.processing_status='ready'
+      ORDER BY c.updated_at DESC, m.created_at DESC LIMIT 1`);
+  }
+
+  abandonRunningTranscriptionJobs(courseId, detail = "應用程式重新啟動，已安全改由新的轉錄工作接續。") {
+    this.run("UPDATE jobs SET status='interrupted',detail=?,updated_at=? WHERE course_id=? AND status IN ('queued','running') AND type LIKE 'transcription%'", String(detail), now(), normalizeId(courseId));
+  }
+
   markMediaTrash(id, isTrash = true, filePath = null) {
     this.run("UPDATE media SET is_trash=?,file_path=?,deleted_at=? WHERE id=?", isTrash ? 1 : 0, filePath || this.getMedia(id)?.file_path || "", isTrash ? now() : null, normalizeId(id));
     return this.getMedia(id);

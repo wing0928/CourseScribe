@@ -44,6 +44,13 @@ try {
   const annotated = reopened.getCourseDetail(course.id);
   assert.equal(annotated.translations.length, 1, "英文翻譯應保存於本機資料庫");
   assert.equal(annotated.annotations[0].aliases[0], "gallelio", "術語別名應保存於本機資料庫");
+  const pending = reopened.createCourse({ title: "中斷轉錄測試", status: "transcribing" });
+  const pendingMedia = reopened.upsertMedia({ courseId: pending.id, filePath: path.join(root, "pending.m4a"), originalName: "pending.m4a", mediaType: "audio", extension: "m4a", size: 12, processingStatus: "ready" });
+  const pendingJob = reopened.createJob(pending.id, "transcription");
+  reopened.updateJob(pendingJob.id, { status: "running" });
+  assert.equal(reopened.getMostRecentInterruptedTranscription().media_id, pendingMedia.id, "最近中斷的轉錄應可在下次啟動恢復");
+  reopened.abandonRunningTranscriptionJobs(pending.id);
+  assert.equal(reopened.getJob(pendingJob.id).status, "interrupted", "舊工作須明確標示已被恢復流程取代");
   const prior = reopened.saveNotes(course.id, { status: "ready", json: { summary: "舊筆記" }, text: "舊筆記" });
   assert.equal(prior.json.summary, "舊筆記");
   reopened.saveNotes(course.id, { status: "processing" });

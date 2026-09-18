@@ -780,6 +780,17 @@ if (!gotSingleInstanceLock) {
     }
   }
 
+  async function recoverMostRecentTranscription() {
+    const pending = courseDb.getMostRecentInterruptedTranscription();
+    if (!pending) return;
+    courseDb.abandonRunningTranscriptionJobs(pending.course_id);
+    courseDb.clearSegments(pending.course_id);
+    const job = courseDb.createJob(pending.course_id, "transcription-resume");
+    activeJobs.set(job.id, pending.course_id);
+    startupLog(`恢復中斷轉錄：${pending.title}`);
+    void runImportedPipeline(pending.course_id, pending.media_id, pending.language, job.id);
+  }
+
   function recoverInterruptedNotes() {
     for (const row of courseDb.all("SELECT id FROM courses WHERE status='summarizing'")) {
       const message = "上次課程整理未完成；已保留逐字稿與前次筆記，可重新整理。";
@@ -1099,6 +1110,7 @@ if (!gotSingleInstanceLock) {
       courseDb = new CourseDatabase(path.join(userData, "coursescribe.sqlite"));
       ollama = new OllamaClient();
       await recoverInterruptedRecordings();
+      await recoverMostRecentTranscription();
       recoverInterruptedNotes();
       await purgeExpiredTrash();
       protocol.handle("coursescribe-media", async (request) => {
