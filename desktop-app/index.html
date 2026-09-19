@@ -32,6 +32,7 @@
             <label><span>課程分類</span><div class="select-with-action"><select data-category><option value="">未分類</option></select><button type="button" class="tiny-button" data-add-category aria-label="新增課程分類">＋</button></div></label>
             <label><span>學期</span><div class="select-with-action"><select data-semester><option value="">未指定</option></select><button type="button" class="tiny-button" data-add-semester aria-label="新增學期">＋</button></div></label>
             <label><span>逐字稿語言</span><select data-language><option value="zh-TW">繁體中文（臺灣）</option><option value="zh-CN">簡體中文</option><option value="en-US">English</option><option value="ja-JP">日本語</option></select></label>
+            <label><span>匯入檔案轉錄速度</span><select data-whisper-model><option value="onnx-community/whisper-small">高準確 · Whisper-small（較慢）</option><option value="onnx-community/whisper-base">快速 · Whisper-base（可能較不準）</option></select></label>
             <label><span>筆記模型</span><select data-model></select></label>
           </div>
           <div class="inline-add" data-add-category-form hidden><input data-new-category placeholder="例如：微積分甲" maxlength="80" /><button type="button" data-save-category>新增分類</button><button type="button" class="quiet" data-cancel-category>取消</button></div>

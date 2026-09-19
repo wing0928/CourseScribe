@@ -8,6 +8,7 @@ const els = {
   category: $(`[data-category]`),
   semester: $(`[data-semester]`),
   language: $(`[data-language]`),
+  whisperModel: $(`[data-whisper-model]`),
   model: $(`[data-model]`),
   state: $(`[data-state]`),
   record: $(`[data-record]`),
@@ -79,7 +80,7 @@ const state = {
 const STATUS_LABELS = {
   draft: "草稿", recording: "錄製中", transcribing: "轉錄中", summarizing: "整理中", ready: "已完成", failed: "需處理",
 };
-const STAGE_LABELS = { model: "WHISPER", audio: "準備音訊", recording: "錄影中", transcribe: "轉錄中", notes: "整理筆記", translate: "翻譯逐字稿", complete: "完成", error: "需要處理" };
+const STAGE_LABELS = { model: "WHISPER", audio: "準備音訊", recording: "錄影中", transcribe: "轉錄中", notes: "整理筆記", translate: "翻譯逐字稿", complete: "完成", stopped: "已停止", error: "需要處理" };
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[character]));
@@ -762,19 +763,23 @@ function renderCourseDetail(detail) {
   const course = detail.course;
   const video = detail.media.find((item) => item.mediaType === "video" && item.mediaUrl);
   const mediaText = detail.media.map((item) => `${item.mediaType === "video" ? "影片" : "錄音"} · ${formatBytes(item.size)}`).join("／") || "尚無媒體";
-  const translations = new Map((detail.translations || []).filter((item) => item.targetLanguage === "en").map((item) => [item.segmentId, item.text]));
-  const english = state.detailTranscriptLanguage === "en";
+  const translations = new Map((detail.translations || []).filter((item) => item.targetLanguage === state.detailTranscriptLanguage).map((item) => [item.segmentId, item.text]));
+  const translated = state.detailTranscriptLanguage !== "original";
+  const englishCount = (detail.translations || []).filter((item) => item.targetLanguage === "en").length;
+  const chineseCount = (detail.translations || []).filter((item) => item.targetLanguage === "zh-TW").length;
+  const transcriptTools = `<div class="transcript-tools"><button type="button" data-detail-translate="en" ${englishCount === detail.segments.length ? "disabled" : ""}>翻譯成英文</button><button type="button" data-detail-translate="zh-TW" ${chineseCount === detail.segments.length ? "disabled" : ""}>翻譯成繁體中文</button><button type="button" data-detail-language-view="original" class="${!translated ? "selected" : ""}">原文</button><button type="button" data-detail-language-view="en" class="${state.detailTranscriptLanguage === "en" ? "selected" : ""}" ${englishCount ? "" : "disabled"}>English</button><button type="button" data-detail-language-view="zh-TW" class="${state.detailTranscriptLanguage === "zh-TW" ? "selected" : ""}" ${chineseCount ? "" : "disabled"}>繁體中文</button></div>`;
   const visibleSegments = detail.segments.slice(0, state.detailTranscriptLimit);
   const segments = detail.segments.length
-    ? `${visibleSegments.map((item) => `<button type="button" class="segment" data-start-ms="${Number(item.startMs) || 0}"><time>${formatTime(item.startMs)}</time><span>${escapeHtml(english ? (translations.get(item.id) || "（尚未翻譯）") : applyTranscriptCorrections(item.text, detail.annotations))}</span></button>`).join("")}${detail.segments.length > visibleSegments.length ? `<button type="button" class="quiet-button transcript-more" data-detail-transcript-more>載入更多逐字稿（尚餘 ${detail.segments.length - visibleSegments.length} 段）</button>` : ""}`
+    ? `${visibleSegments.map((item) => `<button type="button" class="segment" data-start-ms="${Number(item.startMs) || 0}"><time>${formatTime(item.startMs)}</time><span>${escapeHtml(translated ? (translations.get(item.id) || "（尚未翻譯）") : applyTranscriptCorrections(item.text, detail.annotations))}</span></button>`).join("")}${detail.segments.length > visibleSegments.length ? `<button type="button" class="quiet-button transcript-more" data-detail-transcript-more>載入更多逐字稿（尚餘 ${detail.segments.length - visibleSegments.length} 段）</button>` : ""}`
     : `<div class="list-empty">目前沒有逐字稿片段。</div>`;
   const trash = Boolean(course.deleted_at);
   const categoryOptions = state.categories.map((item) => `<option value="${escapeHtml(item.id)}"${item.id === course.categoryId ? " selected" : ""}>${escapeHtml(item.name)}</option>`).join("");
   const semesterOptions = state.semesters.map((item) => `<option value="${escapeHtml(item)}"${item === course.semester ? " selected" : ""}>${escapeHtml(item)}</option>`).join("");
   const modelOptions = (state.models.choices || []).map((item) => `<option value="${escapeHtml(item.name)}"${item.name === course.model ? " selected" : ""}>${escapeHtml(item.label)}</option>`).join("");
+  const canStopTranscription = !trash && course.status === "transcribing" && (detail.jobs || []).some((item) => item.status === "running" && String(item.type || "").startsWith("transcription"));
   const courseEditor = trash ? "" : `<details class="course-editor"><summary>編輯這堂課的資訊</summary><div class="course-edit-grid"><label>課程名稱<input data-detail-title value="${escapeHtml(course.title)}" maxlength="200"></label><label>分類<select data-detail-category><option value=""${!course.categoryId ? " selected" : ""}>未分類</option>${categoryOptions}<option value="__new__">＋ 新增分類</option></select><input data-detail-new-category-input hidden placeholder="新增分類名稱" maxlength="80"></label><label>學期<select data-detail-semester><option value=""${!course.semester ? " selected" : ""}>未指定</option>${semesterOptions}<option value="__new__">＋ 新增學期</option></select><input data-detail-new-semester-input hidden placeholder="新增學期，例如 114-1" maxlength="40"></label><label>逐字稿語言<select data-detail-language><option value="zh-TW"${course.language === "zh-TW" ? " selected" : ""}>繁體中文（臺灣）</option><option value="zh-CN"${course.language === "zh-CN" ? " selected" : ""}>簡體中文</option><option value="en-US"${course.language === "en-US" ? " selected" : ""}>English</option><option value="ja-JP"${course.language === "ja-JP" ? " selected" : ""}>日本語</option></select></label><label>筆記模型<select data-detail-model>${modelOptions}</select></label></div><button type="button" data-detail-save>儲存全部資訊</button></details>`;
   els.courseDetail.hidden = false;
-  els.courseDetail.innerHTML = `<div class="detail-header"><div><button type="button" class="quiet-button" data-detail-back>← 返回列表</button><h2>${escapeHtml(course.title)}</h2><small>${escapeHtml(course.categoryName || "未分類")} · ${escapeHtml(course.semester || "未指定")} · ${escapeHtml(mediaText)} · ${STATUS_LABELS[course.status] || course.status}</small></div><div class="detail-actions">${trash ? `<button type="button" data-detail-action="restore">還原</button><button type="button" class="danger" data-detail-action="delete">永久刪除</button>` : `<button type="button" data-detail-action="retry">重新轉錄</button><button type="button" data-detail-action="notes">重新整理筆記</button><button type="button" class="danger" data-detail-action="trash">移到回收桶</button>`}</div></div>${courseEditor}<div data-detail-process-host>${renderProcessHistory(detail)}</div>${video ? `<div class="media-preview"><video controls preload="metadata" data-detail-video src="${escapeHtml(video.mediaUrl)}"></video></div>` : detail.media.length ? `<div class="audio-note">這門課是錄音檔。依設定不顯示影音預覽，但保留逐字稿時間戳。</div>` : ""}<div class="detail-grid"><section class="detail-section"><div class="detail-section-head"><h3>完整逐字稿 · ${detail.segments.length} 段</h3><div class="transcript-tools"><button type="button" data-detail-translate ${translations.size === detail.segments.length ? "disabled" : ""}>翻譯成英文</button><button type="button" data-detail-language-view="original" class="${!english ? "selected" : ""}">原文</button><button type="button" data-detail-language-view="en" class="${english ? "selected" : ""}" ${translations.size ? "" : "disabled"}>English</button></div></div><div class="detail-transcript" data-detail-transcript>${segments}</div></section><section class="detail-section"><h3>課程筆記</h3><div class="detail-note">${renderDetailNotes(detail.notes)}</div></section></div>${course.error ? `<div class="retry-box">${escapeHtml(course.error)}<br />可按上方重新轉錄或重新整理筆記。</div>` : ""}`;
+  els.courseDetail.innerHTML = `<div class="detail-header"><div><button type="button" class="quiet-button" data-detail-back>← 返回列表</button><h2>${escapeHtml(course.title)}</h2><small>${escapeHtml(course.categoryName || "未分類")} · ${escapeHtml(course.semester || "未指定")} · ${escapeHtml(mediaText)} · ${STATUS_LABELS[course.status] || course.status}</small></div><div class="detail-actions">${trash ? `<button type="button" data-detail-action="restore">還原</button><button type="button" class="danger" data-detail-action="delete">永久刪除</button>` : `${canStopTranscription ? `<button type="button" class="danger" data-detail-action="stop-transcription">停止轉錄</button>` : ""}<button type="button" data-detail-action="retry">重新轉錄</button><button type="button" data-detail-action="notes">重新整理筆記</button><button type="button" class="danger" data-detail-action="trash">移到回收桶</button>`}</div></div>${courseEditor}<div data-detail-process-host>${renderProcessHistory(detail)}</div>${video ? `<div class="media-preview"><video controls preload="metadata" data-detail-video src="${escapeHtml(video.mediaUrl)}"></video></div>` : detail.media.length ? `<div class="audio-note">這門課是錄音檔。依設定不顯示影音預覽，但保留逐字稿時間戳。</div>` : ""}<div class="detail-grid"><section class="detail-section"><div class="detail-section-head"><h3>完整逐字稿 · ${detail.segments.length} 段</h3>${transcriptTools}</div><div class="detail-transcript" data-detail-transcript>${segments}</div></section><section class="detail-section"><h3>課程筆記</h3><div class="detail-note">${renderDetailNotes(detail.notes)}</div></section></div>${course.error ? `<div class="retry-box">${escapeHtml(course.error)}<br />可按上方重新轉錄或重新整理筆記。</div>` : ""}`;
   renderDetailProgress(course.id);
   const player = $(`[data-detail-video]`, els.courseDetail);
   if (player) {
@@ -844,7 +849,7 @@ async function saveDetailCourse() {
   } finally { button.disabled = false; }
 }
 
-async function handleDetailAction(action) {
+async function handleDetailAction(action, targetLanguage = "en") {
   const id = state.selectedCourseId;
   if (!id) return;
   try {
@@ -853,8 +858,12 @@ async function handleDetailAction(action) {
     if (action === "restore") { await window.courseCapture.courses.restore(id); setDatabaseMessage("課程已還原。"); }
     if (action === "delete") { if (!window.confirm("永久刪除這門課程及其媒體？媒體會移到 Windows 回收桶。")) return; await window.courseCapture.courses.deletePermanently(id); state.selectedCourseId = ""; els.courseDetail.hidden = true; setDatabaseMessage("課程已永久刪除。"); }
     if (action === "retry") { const job = await window.courseCapture.transcription.retry(id); setDatabaseMessage(`已重新開始轉錄，工作編號 ${job.jobId.slice(0, 8)}。`); }
+    if (action === "stop-transcription") { const result = await window.courseCapture.transcription.cancel(id); setDatabaseMessage(result.stopped ? "已停止轉錄；已完成片段與媒體已保留。" : result.reason); }
     if (action === "notes") { await window.courseCapture.notes.generate(id, state.models.selected); setDatabaseMessage("課程筆記已重新整理。"); }
-    if (action === "translate") { await window.courseCapture.translations.generate(id, "en", state.models.selected); setDatabaseMessage("英文逐字稿已儲存，可切換查看。"); }
+    if (action === "translate") {
+      await window.courseCapture.translations.generate(id, targetLanguage, state.models.selected);
+      setDatabaseMessage(`${targetLanguage === "zh-TW" ? "繁體中文" : "英文"}逐字稿已儲存，可切換查看。`);
+    }
     await openCourse(state.selectedCourseId || id);
   } catch (error) { setDatabaseMessage(error.message || "操作失敗"); }
 }
@@ -913,6 +922,12 @@ $(`[data-cancel-model]`).addEventListener("click", cancelModelPull);
 $(`[data-open-ollama]`).addEventListener("click", () => window.courseCapture.models.openDownload());
 els.modelStatus.addEventListener("click", (event) => { const button = event.target.closest("[data-model-action]"); if (button) handleModelAction(button.dataset.modelAction, button.dataset.model); });
 els.model.addEventListener("change", async () => { try { state.models.selected = els.model.value; await window.courseCapture.models.select(els.model.value); } catch (error) { setStatus(error.message || "模型選擇失敗", "error"); } });
+els.whisperModel.addEventListener("change", async () => {
+  try {
+    await window.courseCapture.transcription.selectModel(els.whisperModel.value);
+    setStatus("轉錄模式已儲存；下一個匯入或重新轉錄的工作會使用此模式。", "success");
+  } catch (error) { setStatus(error.message || "無法切換轉錄模式", "error"); }
+});
 $(`[data-back-home]`).addEventListener("click", () => setView("home"));
 $(`[data-toggle-trash]`).addEventListener("click", (event) => { state.trashMode = !state.trashMode; event.currentTarget.textContent = state.trashMode ? "返回課程" : "回收桶"; state.selectedCourseId = ""; els.courseDetail.hidden = true; refreshCourses(); });
 [els.dbSearch, els.dbCategory, els.dbSemester, els.dbType, els.dbStatus].forEach((control) => {
@@ -922,7 +937,8 @@ $(`[data-toggle-trash]`).addEventListener("click", (event) => { state.trashMode 
 els.courseList.addEventListener("click", (event) => { const card = event.target.closest("[data-course-id]"); if (card) openCourse(card.dataset.courseId); });
 els.courseDetail.addEventListener("click", (event) => {
   if (event.target.closest("[data-detail-save]")) { saveDetailCourse(); return; }
-  if (event.target.closest("[data-detail-translate]")) { handleDetailAction("translate"); return; }
+  const translateButton = event.target.closest("[data-detail-translate]");
+  if (translateButton) { handleDetailAction("translate", translateButton.dataset.detailTranslate); return; }
   const view = event.target.closest("[data-detail-language-view]");
   if (view) { state.detailTranscriptLanguage = view.dataset.detailLanguageView; renderCourseDetail(state.lastDetail); return; }
   const footnote = event.target.closest("[data-footnote-id]");
@@ -977,7 +993,7 @@ async function initialize() {
   try {
     [state.categories, state.semesters] = await Promise.all([window.courseCapture.categories.list(), window.courseCapture.semesters.list()]);
     renderFilters();
-    await Promise.all([refreshSources(), refreshModels(), refreshCourses()]);
+    await Promise.all([refreshSources(), refreshModels(), refreshCourses(), window.courseCapture.transcription.model().then((modelId) => { els.whisperModel.value = modelId; })]);
     const info = await window.courseCapture.app.info();
     const versionLabel = document.querySelector("[data-app-version]");
     if (versionLabel) versionLabel.textContent = info.version;

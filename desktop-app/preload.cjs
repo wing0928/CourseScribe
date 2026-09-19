@@ -38,6 +38,9 @@ contextBridge.exposeInMainWorld("courseCapture", {
   transcription: {
     start: (courseId, mediaId, language) => ipcRenderer.invoke("transcription:start", { courseId, mediaId, language }),
     retry: (courseId) => ipcRenderer.invoke("transcription:retry", { courseId }),
+    cancel: (courseId) => ipcRenderer.invoke("transcription:cancel", { courseId }),
+    model: () => ipcRenderer.invoke("transcription:model"),
+    selectModel: (modelId) => ipcRenderer.invoke("transcription:select-model", modelId),
   },
   notes: {
     generate: (courseId, model) => ipcRenderer.invoke("notes:generate", { courseId, model }),

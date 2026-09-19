@@ -40,9 +40,12 @@ try {
   assert.deepEqual(normalizeNoteShape({ summary: "x", keyPoints: ["y"] }), { summary: "x", sections: [{ title: "舊版重點（建議重新整理）", timestamp: "", points: [{ text: "y", quote: "", kind: "core", timestamp: "", status: "needs_review" }] }], confusions: [], reviewQuestions: [], takeaway: "", annotations: [] });
   const segment = reopened.addSegments(course.id, media.id, [{ startMs: 2000, text: "Galileo" }], "en-US")[0];
   reopened.saveTranslations(course.id, "en", [{ segmentId: segment.id, text: "Galileo" }], "gemma4:e2b");
+  reopened.saveTranslations(course.id, "zh-TW", [{ segmentId: segment.id, text: "伽利略" }], "gemma4:e2b");
+  reopened.setSetting("selectedWhisperModel", "onnx-community/whisper-base");
+  assert.equal(reopened.getSetting("selectedWhisperModel"), "onnx-community/whisper-base", "快速轉錄模式應保存於本機設定");
   reopened.saveAnnotations(course.id, [{ term: "伽利略", aliases: ["gallelio"], note: "近代科學的重要人物。" }]);
   const annotated = reopened.getCourseDetail(course.id);
-  assert.equal(annotated.translations.length, 1, "英文翻譯應保存於本機資料庫");
+  assert.equal(annotated.translations.length, 2, "英文與繁體中文翻譯應分別保存於本機資料庫");
   assert.equal(annotated.annotations[0].aliases[0], "gallelio", "術語別名應保存於本機資料庫");
   const pending = reopened.createCourse({ title: "中斷轉錄測試", status: "transcribing" });
   const pendingMedia = reopened.upsertMedia({ courseId: pending.id, filePath: path.join(root, "pending.m4a"), originalName: "pending.m4a", mediaType: "audio", extension: "m4a", size: 12, processingStatus: "ready" });
@@ -68,7 +71,9 @@ try {
   assert.match(main, /coursescribe-media/);
   assert.match(main, /TRASH_RETENTION_MS/);
   assert.match(main, /purgeExpiredTrash/);
-  assert.match(main, /whisper-worker/);
+  assert.match(main, /getWhisper/);
+  assert.match(main, /transcription:cancel/);
+  assert.match(main, /activeTranscriptions/);
   assert.match(fs.readFileSync(path.join(__dirname, "..", "ollama.cjs"), "utf8"), /segment\.startMs/);
   console.log(JSON.stringify({ ok: true, persistence: true, translations: true, annotations: true, opencc: true, ollamaJson: true, singleInstance: true }));
 } finally {

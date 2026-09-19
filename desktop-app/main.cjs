@@ -16,8 +16,8 @@ const {
 const path = require("node:path");
 const fs = require("node:fs/promises");
 const fsSync = require("node:fs");
-const { Worker } = require("node:worker_threads");
 const os = require("node:os");
+const { fork } = require("node:child_process");
 const { randomUUID, createHash } = require("node:crypto");
 const { pathToFileURL } = require("node:url");
 const ffmpegPath = require("ffmpeg-static");
@@ -78,6 +78,7 @@ if (!gotSingleInstanceLock) {
   const pendingImports = new Map();
   const liveSessions = new Map();
   const activeJobs = new Map();
+  const activeTranscriptions = new Map();
 
   function startupLog(message) {
     const line = `[${new Date().toISOString()}] ${String(message || "")}\n`;
@@ -331,7 +332,7 @@ if (!gotSingleInstanceLock) {
       whisperLoad = (async () => {
         emitProgress(null, "model", "正在準備本機 Whisper 模型", 0);
         const { pipeline, env } = await import("@huggingface/transformers");
-        env.cacheDir = path.join(app.getPath("userData"), "whisper-models");
+        env.cacheDir = process.env.COURSESCRIBE_MODEL_CACHE_DIR || path.join(app.getPath("userData"), "whisper-models");
         whisperPipeline = await pipeline("automatic-speech-recognition", "onnx-community/whisper-small", {
           dtype: "q4",
           device: "cpu",
@@ -404,81 +405,120 @@ if (!gotSingleInstanceLock) {
     const media = courseDb.getMedia(mediaId);
     if (!media) throw new Error("找不到要轉錄的媒體");
     courseDb.updateCourse(courseId, { status: "transcribing", error: null });
-    courseDb.updateJob(jobId, { status: "running", detail: "正在啟動背景轉錄", progress: 1 });
-    emitProgress(courseId, "audio", `正在以背景程序準備${fileTypeLabel(media.media_type)}音訊`, 1);
-    // Keep FFmpeg in Electron's main process. It is still asynchronous (the UI
-    // stays responsive), but avoids spawning an executable from inside an
-    // unpacked Node Worker, which can hang on packaged Windows installations.
+    courseDb.updateJob(jobId, { status: "running", detail: "正在準備相容模式轉錄", progress: 1 });
+    emitProgress(courseId, "audio", `正在準備${fileTypeLabel(media.media_type)}音訊`, 1);
+    const selectedWhisperModel = courseDb.getSetting("selectedWhisperModel", "onnx-community/whisper-small");
+    const whisperModelId = selectedWhisperModel === "onnx-community/whisper-base"
+      ? selectedWhisperModel
+      : "onnx-community/whisper-small";
+    const controller = { jobId, cancelled: false };
+    activeTranscriptions.set(courseId, controller);
     const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "coursescribe-transcribe-"));
     const wavPath = path.join(tempRoot, "audio.wav");
+    let worker = null;
     try {
       courseDb.updateJob(jobId, { status: "running", detail: "正在準備音訊", progress: 2 });
       await transcodeMediaToWav({ ffmpegPath, inputPath: media.file_path, outputPath: wavPath });
-      courseDb.updateJob(jobId, { status: "running", detail: "音訊準備完成，正在啟動 Whisper", progress: 4 });
-      emitProgress(courseId, "audio", "音訊準備完成，正在載入背景 Whisper 模型", 4);
-      return await new Promise((resolve, reject) => {
-      // Node workers cannot reliably execute an entry file virtualized inside
-      // app.asar.  electron-builder unpacks this file for packaged builds;
-      // development keeps the original path.
-      const workerSource = path.join(__dirname, "whisper-worker.cjs");
-      const unpackedWorker = workerSource.replace(/app\.asar([\\/])/, "app.asar.unpacked$1");
-      const workerPath = fsSync.existsSync(unpackedWorker) ? unpackedWorker : workerSource;
-      const worker = new Worker(workerPath, { workerData: {
-        wavPath, language,
-        appRoot: __dirname,
-        modelCacheDir: path.join(app.getPath("userData"), "whisper-models"),
-      } });
-      let settled = false;
-      let lastWorkerMessageAt = Date.now();
-      // Keep already persisted segments on automatic recovery.  A recovered
-      // worker starts from the beginning, so de-duplicate its repeated output
-      // instead of deleting the user's partial transcript.
+      if (controller.cancelled) {
+        const error = new Error("已停止轉錄工作。已完成的逐字稿片段與媒體已保留，可隨時重新轉錄。");
+        error.code = "TRANSCRIPTION_STOPPED";
+        throw error;
+      }
+      courseDb.updateJob(jobId, { status: "running", detail: "正在載入本機 Whisper 模型", progress: 4 });
+      emitProgress(courseId, "audio", "正在載入本機 Whisper 模型", 4);
       const knownSegments = new Set(courseDb.listSegments(courseId).map((segment) => `${Math.round(Number(segment.start_ms) / 100)}:${String(segment.text || "").trim()}`));
-      const watchdog = setInterval(() => {
-        if (!settled && Date.now() - lastWorkerMessageAt > 180000) finish(new Error("Whisper 模型超過 3 分鐘沒有回報進度，已停止這次工作。請確認本機模型完整後重新轉錄。"));
-      }, 15000);
-      const finish = (error = null) => {
-        if (settled) return;
-        settled = true;
-        clearInterval(watchdog);
-        worker.terminate().catch(() => {});
-        if (error) reject(error);
-        else {
-          const segmentCount = courseDb.listSegments(courseId).length;
-          if (!segmentCount) reject(new Error("Whisper 沒有辨識到可用文字，請確認檔案包含清楚的課程聲音。"));
-          else {
-            courseDb.updateJob(jobId, { status: "completed", detail: "逐字稿完成", progress: 100 });
-            emitProgress(courseId, "transcribe", "逐字稿完成，準備整理課程筆記", 100);
-            resolve(segmentCount);
+      const appRoot = app.isPackaged ? path.join(process.resourcesPath, "app.asar") : __dirname;
+      const workerPath = app.isPackaged
+        ? path.join(process.resourcesPath, "app.asar.unpacked", "whisper-worker.cjs")
+        : path.join(__dirname, "whisper-worker.cjs");
+      await fs.access(workerPath);
+      worker = fork(workerPath, [], {
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe", "ipc"],
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+      });
+      controller.worker = worker;
+      worker.stderr?.on("data", (chunk) => startupLog(`Whisper 背景程序：${String(chunk).trim()}`));
+      const workerResult = await new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (callback, value) => {
+          if (settled) return;
+          settled = true;
+          callback(value);
+        };
+        worker.on("message", (message) => {
+          if (message?.type === "stage") {
+            const progress = Number.isFinite(Number(message.progress)) ? Number(message.progress) : 4;
+            courseDb.updateJob(jobId, { status: "running", detail: message.detail, progress });
+            emitProgress(courseId, progress <= 4 ? "audio" : "transcribe", message.detail, progress);
+            return;
           }
-        }
-      };
-      worker.on("message", (message) => {
-        lastWorkerMessageAt = Date.now();
-        if (message.type === "stage") {
-          courseDb.updateJob(jobId, { status: "running", detail: message.detail, progress: Number(message.progress) || 1 });
-          emitProgress(courseId, "audio", message.detail, message.progress);
-        } else if (message.type === "segments") {
-          const recognized = (message.segments || []).map((segment) => ({ ...segment, text: normalizeWhisperText(segment.text, languageName(language), language) }));
-          const newSegments = recognized.filter((segment) => {
-            const key = `${Math.round(Number(segment.startMs) / 100)}:${String(segment.text || "").trim()}`;
-            if (knownSegments.has(key)) return false;
-            knownSegments.add(key);
-            return true;
-          });
-          if (newSegments.length) courseDb.addSegments(courseId, mediaId, newSegments, language);
-          courseDb.updateJob(jobId, { status: "running", detail: `已完成第 ${message.chunkIndex}/${message.total} 段`, progress: message.progress });
-          emitProgress(courseId, "transcribe", `正在轉錄第 ${message.chunkIndex}/${message.total} 段`, message.progress);
-          emitUpdated(courseId, "transcript");
-        } else if (message.type === "complete") finish();
-        else if (message.type === "error") finish(new Error(message.message));
+          if (message?.type === "model-progress") {
+            courseDb.updateJob(jobId, { status: "running", detail: message.detail, progress: 4 });
+            emitProgress(courseId, "audio", message.detail, 4, { modelProgress: message.progress });
+            return;
+          }
+          if (message?.type === "segments") {
+            const recognized = (message.segments || []).map((segment) => ({
+              ...segment,
+              text: normalizeWhisperText(segment.text, languageName(language), language),
+            })).filter((segment) => segment.text);
+            const newSegments = recognized.filter((segment) => {
+              const key = `${Math.round(Number(segment.startMs) / 100)}:${String(segment.text || "").trim()}`;
+              if (knownSegments.has(key)) return false;
+              knownSegments.add(key);
+              return true;
+            });
+            if (newSegments.length) courseDb.addSegments(courseId, mediaId, newSegments, language);
+            const progress = Math.min(100, Math.max(5, Number(message.progress) || 0));
+            const etaMinutes = Math.ceil((Number(message.etaSeconds) || 0) / 60);
+            const detail = `已完成第 ${message.chunkIndex}/${message.total} 段${etaMinutes && message.chunkIndex < message.total ? `，估計還需約 ${etaMinutes} 分鐘` : ""}`;
+            courseDb.updateJob(jobId, { status: "running", detail, progress });
+            emitProgress(courseId, "transcribe", detail, progress, { etaSeconds: message.etaSeconds });
+            emitUpdated(courseId, "transcript");
+            return;
+          }
+          if (message?.type === "complete") finish(resolve, message);
+          if (message?.type === "error") {
+            const error = new Error(message.message || "背景 Whisper 轉錄失敗");
+            error.stack = message.stack || error.stack;
+            finish(reject, error);
+          }
+        });
+        worker.on("error", (error) => finish(reject, error));
+        worker.on("exit", (code, signal) => {
+          if (settled) return;
+          if (controller.cancelled) {
+            const error = new Error("已停止轉錄工作。已完成的逐字稿片段與媒體已保留，可隨時重新轉錄。");
+            error.code = "TRANSCRIPTION_STOPPED";
+            finish(reject, error);
+          } else {
+            finish(reject, new Error(`背景 Whisper 程序意外結束（${code}${signal ? `/${signal}` : ""}）`));
+          }
+        });
+        worker.send({ type: "start", config: {
+          wavPath,
+          language,
+          appRoot,
+          ffmpegPath,
+          modelCacheDir: process.env.COURSESCRIBE_MODEL_CACHE_DIR || path.join(app.getPath("userData"), "whisper-models"),
+          modelId: whisperModelId,
+        }});
       });
-      worker.on("error", (error) => finish(error));
-      worker.on("exit", (code) => {
-        if (!settled) finish(new Error(`背景轉錄程序在送出結果前結束（${code}）。請重新轉錄。`));
-      });
-      });
+      if (controller.cancelled) {
+        const error = new Error("已停止轉錄工作。已完成的逐字稿片段與媒體已保留，可隨時重新轉錄。");
+        error.code = "TRANSCRIPTION_STOPPED";
+        throw error;
+      }
+      startupLog(`背景 Whisper 完成課程 ${courseId}：${workerResult.total || 0} 段音訊`);
+      const segmentCount = courseDb.listSegments(courseId).length;
+      if (!segmentCount) throw new Error("Whisper 沒有辨識到可用文字，請確認檔案包含清楚的課程聲音。");
+      courseDb.updateJob(jobId, { status: "completed", detail: "逐字稿完成", progress: 100 });
+      emitProgress(courseId, "transcribe", "逐字稿完成，準備整理課程筆記", 100);
+      return segmentCount;
     } finally {
+      if (activeTranscriptions.get(courseId)?.jobId === jobId) activeTranscriptions.delete(courseId);
+      if (worker && !worker.killed) worker.kill();
       await fs.rm(tempRoot, { recursive: true, force: true });
     }
   }
@@ -591,11 +631,15 @@ if (!gotSingleInstanceLock) {
     const course = courseDb.getCourse(courseId);
     const segments = courseDb.listSegments(courseId);
     if (!course || !segments.length) throw new Error("逐字稿尚未完成，無法翻譯。");
-    const model = String(requestedModel || course.model || courseDb.getSetting("selectedOllamaModel", DEFAULT_MODEL));
+    if (!["en", "zh-TW"].includes(targetLanguage)) throw new Error("不支援的翻譯語言。");
+    const selectedModel = String(requestedModel || course.model || courseDb.getSetting("selectedOllamaModel", DEFAULT_MODEL));
     const status = await ollama.status();
     if (!status.available) throw new Error("找不到本機 Ollama。請先啟動 Ollama 後再翻譯。");
+    const model = targetLanguage === "zh-TW" && status.models.includes(HIGH_QUALITY_MODEL)
+      ? HIGH_QUALITY_MODEL
+      : selectedModel;
     if (!status.models.includes(model)) throw new Error(`本機尚未下載 ${model}。請先下載模型後再翻譯。`);
-    const target = String(targetLanguage || "en").toLowerCase() === "en" ? "English" : String(targetLanguage);
+    const target = targetLanguage === "en" ? "English" : "Traditional Chinese as used in Taiwan (繁體中文／臺灣用語)";
     const batches = [];
     for (let index = 0; index < segments.length; index += 24) batches.push(segments.slice(index, index + 24));
     const translated = [];
@@ -604,21 +648,33 @@ if (!gotSingleInstanceLock) {
       const source = batch.map((segment) => ({ id: segment.id, text: segment.text }));
       const result = await generateJsonWithRepair({
         model,
-        system: "You are a careful academic transcript translator. Return valid JSON only. Preserve meaning, terminology, formulas and uncertainty; do not summarize, omit, merge or invent sentences.",
-        prompt: `Translate every item below into ${target}. Keep every id exactly once. Do not correct or rewrite the source transcript.\n${JSON.stringify({ items: source })}`,
+        system: targetLanguage === "zh-TW"
+          ? "You are a careful translator. Translate every text to Traditional Chinese used in Taiwan. Never copy an English source as the answer. Keep each id unchanged and return valid JSON only. Preserve meaning, terminology, formulas and uncertainty; do not summarize, omit, merge or invent sentences."
+          : "You are a careful academic transcript translator. Return valid JSON only. Preserve meaning, terminology, formulas and uncertainty; do not summarize, omit, merge or invent sentences.",
+        prompt: `${targetLanguage === "zh-TW" ? "Example: Force equals mass. must become 力等於質量。 " : ""}Translate every item below into ${target}. Keep every id exactly once.\n${JSON.stringify({ items: source })}`,
         schema: TRANSLATION_SCHEMA,
         maxOutputTokens: 1800,
         timeoutMs: 600000,
         onProgress: ({ characters }) => emitProgress(courseId, "translate", `翻譯第 ${index + 1}/${batches.length} 段：已生成 ${characters} 字`, Math.round((index / batches.length) * 100), { model }),
       });
       const allowed = new Set(batch.map((segment) => segment.id));
-      const mapped = new Map((result.value?.items || []).filter((item) => allowed.has(String(item?.id)) && String(item?.text || "").trim()).map((item) => [String(item.id), String(item.text).trim()]));
+      const sourceById = new Map(batch.map((segment) => [String(segment.id), String(segment.text || "").trim()]));
+      const mapped = new Map((result.value?.items || []).filter((item) => {
+        const id = String(item?.id || "");
+        const text = String(item?.text || "").trim();
+        if (!allowed.has(id) || !text) return false;
+        if (targetLanguage !== "zh-TW") return true;
+        return /[\u3400-\u9fff]/u.test(text) && text.normalize("NFKC").toLowerCase() !== sourceById.get(id)?.normalize("NFKC").toLowerCase();
+      }).map((item) => [String(item.id), String(item.text).trim()]));
       if (mapped.size !== batch.length) throw new Error(`翻譯第 ${index + 1} 段不完整，原始逐字稿未變更，請重試。`);
-      translated.push(...batch.map((segment) => ({ segmentId: segment.id, text: mapped.get(segment.id) })));
-      emitProgress(courseId, "translate", `已完成第 ${index + 1}/${batches.length} 段英文翻譯`, Math.round(((index + 1) / batches.length) * 100), { model });
+      translated.push(...batch.map((segment) => ({
+        segmentId: segment.id,
+        text: targetLanguage === "zh-TW" ? toTraditionalTaiwan(mapped.get(segment.id), "zh-TW") : mapped.get(segment.id),
+      })));
+      emitProgress(courseId, "translate", `已完成第 ${index + 1}/${batches.length} 段${targetLanguage === "en" ? "英文" : "繁體中文"}翻譯`, Math.round(((index + 1) / batches.length) * 100), { model });
     }
     const rows = courseDb.saveTranslations(courseId, String(targetLanguage || "en"), translated, model);
-    emitProgress(courseId, "translate", "英文逐字稿已儲存", 100, { model });
+    emitProgress(courseId, "translate", `${targetLanguage === "en" ? "英文" : "繁體中文"}逐字稿已儲存`, 100, { model });
     emitUpdated(courseId, "translation");
     return rows;
   }
@@ -628,6 +684,14 @@ if (!gotSingleInstanceLock) {
       await transcribeFileCourse(courseId, mediaId, language, jobId);
       await generateNotesForCourse(courseId);
     } catch (error) {
+      if (error?.code === "TRANSCRIPTION_STOPPED") {
+        startupLog(`課程轉錄已由使用者停止：${courseId}`);
+        courseDb.updateCourse(courseId, { status: "failed", error: error.message });
+        courseDb.updateJob(jobId, { status: "interrupted", error: null, detail: error.message });
+        emitProgress(courseId, "stopped", error.message, 100, { code: error.code });
+        emitUpdated(courseId, "transcription-stopped");
+        return;
+      }
       startupLog(`課程處理失敗: ${error.stack || error.message}`);
       courseDb.updateCourse(courseId, { status: "failed", error: error.message });
       courseDb.updateJob(jobId, { status: "failed", error: error.message, detail: error.message });
@@ -974,11 +1038,27 @@ if (!gotSingleInstanceLock) {
       const detail = courseDb.getCourseDetail(id);
       const media = detail?.media.find((item) => item.processing_status !== "recording") || detail?.media[0];
       if (!media) throw new Error("找不到可重新轉錄的媒體");
-      courseDb.clearSegments(id);
       const job = courseDb.createJob(id, "transcription-retry");
       activeJobs.set(job.id, id);
       void runImportedPipeline(id, media.id, detail.course.language, job.id);
       return { jobId: job.id };
+    });
+    ipcMain.handle("transcription:cancel", (_event, { courseId }) => {
+      const id = validateCourseId(courseId);
+      const active = activeTranscriptions.get(id);
+      if (!active) return { stopped: false, reason: "沒有正在執行的轉錄工作。" };
+      active.cancelled = true;
+      if (active.worker && !active.worker.killed) {
+        try { active.worker.send({ type: "cancel" }); } catch {}
+        active.worker.kill();
+      }
+      return { stopped: true, pending: true, jobId: active.jobId };
+    });
+    ipcMain.handle("transcription:model", () => courseDb.getSetting("selectedWhisperModel", "onnx-community/whisper-small"));
+    ipcMain.handle("transcription:select-model", (_event, modelId) => {
+      if (!["onnx-community/whisper-small", "onnx-community/whisper-base"].includes(modelId)) throw new Error("不支援的 Whisper 模型");
+      courseDb.setSetting("selectedWhisperModel", modelId);
+      return modelId;
     });
     ipcMain.handle("notes:generate", async (_event, { courseId, model }) => {
       const id = validateCourseId(courseId);
@@ -1188,6 +1268,10 @@ if (!gotSingleInstanceLock) {
   }).catch((error) => startupLog(`應用程式啟動失敗: ${error.stack || error.message}`));
 
   app.on("before-quit", () => {
+    for (const active of activeTranscriptions.values()) {
+      active.cancelled = true;
+      try { active.worker?.kill(); } catch {}
+    }
     try { ollama?.cancelAll(); } catch {}
     try { courseDb?.close(); } catch {}
   });

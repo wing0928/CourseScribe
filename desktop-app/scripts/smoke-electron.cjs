@@ -79,9 +79,11 @@ async function run() {
     hasPauseControl: Boolean(document.querySelector("[data-pause-recording]")),
     hasReviewTabs: document.querySelectorAll("[data-review-tab]").length === 2,
     hasModelCancel: Boolean(document.querySelector("[data-cancel-model]")),
+    hasWhisperMode: Boolean(document.querySelector("[data-whisper-model]")),
+    hasWhisperModeBridge: Boolean(window.courseCapture.transcription?.model && window.courseCapture.transcription?.selectModel),
     hasWidgetBridge: Boolean(window.courseCapture.widget?.show && window.courseCapture.widget?.onAction),
   }));
-  if (!initial.hasHome || !initial.hasDatabase || initial.oldPicker || !initial.recordReady || !initial.uploadReady || initial.homeHasTranscript || !initial.hasRecordingWidget || !initial.hasPauseControl || !initial.hasReviewTabs || !initial.hasModelCancel || !initial.hasWidgetBridge) fail(`首頁結構錯誤：${JSON.stringify(initial)}`);
+  if (!initial.hasHome || !initial.hasDatabase || initial.oldPicker || !initial.recordReady || !initial.uploadReady || initial.homeHasTranscript || !initial.hasRecordingWidget || !initial.hasPauseControl || !initial.hasReviewTabs || !initial.hasModelCancel || !initial.hasWhisperMode || !initial.hasWhisperModeBridge || !initial.hasWidgetBridge) fail(`首頁結構錯誤：${JSON.stringify(initial)}`);
   const homeReview = await evaluate(window, async (courseId) => {
     state.courseId = courseId;
     await refreshHomeNotes(courseId);
@@ -100,6 +102,12 @@ async function run() {
   await evaluate(window, (courseId) => document.querySelector(`[data-course-id="${courseId}"]`).click(), recoveryCourse.id);
   await wait(250);
   const genericNotes = await evaluate(window, () => document.querySelector(".detail-note")?.textContent || "");
+  const translationControls = await evaluate(window, () => ({
+    english: Boolean(document.querySelector('[data-detail-translate="en"]')),
+    chinese: Boolean(document.querySelector('[data-detail-translate="zh-TW"]')),
+    chineseView: Boolean(document.querySelector('[data-detail-language-view="zh-TW"]')),
+  }));
+  if (!translationControls.english || !translationControls.chinese || !translationControls.chineseView) fail(`逐字稿翻譯控制不完整：${JSON.stringify(translationControls)}`);
   if (!genericNotes.includes("第一主題") || !genericNotes.includes("第二主題") || genericNotes.includes("科學史人物")) fail("通用主題筆記沒有正確顯示");
   if (!genericNotes.includes("並非事實查核")) fail("筆記必須提醒逐字稿辨識錯誤的風險");
   if (!genericNotes.includes("原文吻合") || !genericNotes.includes("第一個重點的原文") || !genericNotes.includes("待核")) fail("來源引文與舊筆記待核狀態未正確顯示");
